@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "omoctl"
+version = "0.1.0"
+description = "CLI tool for managing oh-my-openagent (OMO) profiles"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "André Ferreira", email = "anfreire.dev@gmail.com" },
+]
+keywords = ["omo", "oh-my-openagent", "opencode", "cli", "profile-manager", "ai-agents"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "pyyaml>=6.0",
+    "dacite>=1.8",
+]
+
+[project.scripts]
+omoctl = "omoctl.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/anfreire/omoctl"
+Repository = "https://github.com/anfreire/omoctl"
+Issues = "https://github.com/anfreire/omoctl/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/omoctl"]
