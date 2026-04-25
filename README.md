@@ -4,23 +4,28 @@ CLI tool for managing [oh-my-openagent](https://github.com/code-yeongyu/oh-my-op
 
 Define profiles, patch models across providers, and switch between configurations with a single command.
 
-## Run
+## Install
 
-No install needed — run on demand with `uvx`:
+Run on demand with no install:
 
 ```bash
 uvx omoctl --help
-uvx omoctl update
-uvx omoctl switch claude
 ```
 
-> The first run downloads the package; subsequent runs are cached.
+Or install permanently:
+
+```bash
+uv tool install omoctl
+omoctl --help
+```
+
+> Examples in this README use the bare `omoctl` form. If you prefer `uvx`, prefix every command (`uvx omoctl update`, `uvx omoctl switch claude`, ...).
 
 ### Prerequisites
 
 - Python 3.11+
-- [bun](https://bun.sh) (for fetching OMO configs via `oh-my-opencode`)
-- OpenCode installed with a populated model cache (`~/.cache/opencode/models.json`)
+- [bun](https://bun.sh) or [npm](https://nodejs.org) (for fetching OMO configs via `oh-my-opencode`)
+- OpenCode installed with a populated model cache (`~/.cache/opencode/models.json` — run `opencode` once to seed it)
 
 ## Quick Start
 
