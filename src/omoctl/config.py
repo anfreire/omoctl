@@ -48,7 +48,7 @@ class Profile:
 @dataclasses.dataclass
 class Config:
     active_profile: str | None = None
-    defaults: dict | None = None
+    overrides: dict | None = None
     patches: list[Patch] | None = None
     profiles: list[Profile] = dataclasses.field(default_factory=list)
 
@@ -73,9 +73,9 @@ class Config:
         return result
 
     def get_effective_overrides(self, profile: Profile) -> dict | None:
-        if not self.defaults and not profile.overrides:
+        if not self.overrides and not profile.overrides:
             return None
-        result = dict(self.defaults) if self.defaults else {}
+        result = dict(self.overrides) if self.overrides else {}
         if profile.overrides:
             result = merge_dicts(result, profile.overrides)
         return result or None
@@ -98,7 +98,7 @@ _DACITE_CONFIG = dacite.Config(check_types=False, strict=True)
 _DEFAULT_YAML = """\
 # active_profile: my-profile
 
-defaults:
+overrides:
   disabled_hooks:
     - context-window-monitor
 

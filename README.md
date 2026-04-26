@@ -69,7 +69,7 @@ That's it. One profile, one provider. Run `omoctl update` and you're done.
 ```yaml
 active_profile: no-copilot
 
-defaults:
+overrides:
   disabled_hooks:
     - context-window-monitor
 
@@ -100,7 +100,7 @@ profiles:
 | Field | Type | Description |
 |---|---|---|
 | `active_profile` | string | Profile to auto-activate after `update`. Optional |
-| `defaults` | dict | OMO config overrides applied to all profiles |
+| `overrides` | dict | OMO config overrides applied to all profiles |
 | `patches` | list | Global patches applied to all profiles (see [Patches](#patches)) |
 | `profiles` | list | Profile definitions (at least one required) |
 
@@ -111,7 +111,7 @@ profiles:
 | `name` | string | **Required.** Display name. Also determines the alias (e.g. `"No Copilot"` -> `no-copilot`) |
 | `providers` | list | **Required.** OMO providers to enable. Run `omoctl validate` to see available providers |
 | `patches` | list | Profile-specific patches. Take priority over global patches |
-| `overrides` | dict | OMO config overrides. Deep-merged on top of `defaults` |
+| `overrides` | dict | OMO config overrides. Deep-merged on top of the global `overrides` |
 
 ## Patches
 
