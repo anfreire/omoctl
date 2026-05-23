@@ -93,7 +93,7 @@ def merge_dicts(
     return result
 
 
-_DACITE_CONFIG = dacite.Config(check_types=False, strict=True)
+_DACITE_CONFIG = dacite.Config(check_types=True, strict=True)
 
 _DEFAULT_YAML = """\
 # active_profile: my-profile
