@@ -31,7 +31,34 @@ from omoctl.store import (
 )
 
 
-def cmd_status(_args: argparse.Namespace) -> None:
+def cmd_status(args: argparse.Namespace) -> None:
+    if args.alias:
+        active_alias = get_active_alias()
+        if not active_alias:
+            die("No active profile. Run 'omoctl use <profile>' first.")
+        print(active_alias)
+        return
+
+    if args.name:
+        active_alias = get_active_alias()
+        if not active_alias:
+            die("No active profile. Run 'omoctl use <profile>' first.")
+        config = load_config()
+        profile = config.find_profile(active_alias)
+        if profile is None:
+            die(f"Active alias {active_alias!r} is not defined in config.yaml.")
+        print(profile.name)
+        return
+
+    if args.json:
+        if not ACTIVE_CONFIG_PATH.exists():
+            die(
+                f"No active config at {ACTIVE_CONFIG_PATH}.\n"
+                f"  Run 'omoctl use <profile>' or 'omoctl update' first."
+            )
+        print(ACTIVE_CONFIG_PATH.read_text())
+        return
+
     config = load_config()
     active_alias = get_active_alias()
 
@@ -67,7 +94,7 @@ def cmd_list(_args: argparse.Namespace) -> None:
     print_profile_list(profiles, active_alias)
 
 
-def cmd_switch(args: argparse.Namespace) -> None:
+def cmd_use(args: argparse.Namespace) -> None:
     config = load_config()
     profile = config.find_profile(args.profile)
 
@@ -144,7 +171,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
     print(f"{DIM}Note: the profile definition is still in config.yaml. Edit it to remove permanently.{RESET}")
 
 
-def cmd_validate(_args: argparse.Namespace) -> None:
+def cmd_check(_args: argparse.Namespace) -> None:
     config = load_config()
     cache = load_model_cache()
 
@@ -159,52 +186,24 @@ def cmd_validate(_args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
-def cmd_show(args: argparse.Namespace) -> None:
-    if args.alias:
-        alias = get_active_alias()
-        if not alias:
-            die("No active profile. Run 'omoctl switch <profile>' first.")
-        print(alias)
-        return
-
-    if args.name:
-        alias = get_active_alias()
-        if not alias:
-            die("No active profile. Run 'omoctl switch <profile>' first.")
-        config = load_config()
-        profile = config.find_profile(alias)
-        if profile is None:
-            die(f"Active alias {alias!r} is not defined in config.yaml.")
-        print(profile.name)
-        return
-
-    if not ACTIVE_CONFIG_PATH.exists():
-        die(
-            f"No active config at {ACTIVE_CONFIG_PATH}.\n"
-            f"  Run 'omoctl switch <profile>' or 'omoctl update' first."
-        )
-
-    if args.json:
-        print(ACTIVE_CONFIG_PATH.read_text())
-        return
-
-    alias = get_active_alias()
-    config = load_config()
-    profile = config.find_profile(alias) if alias else None
-
-    if profile:
-        print(
-            f"{BOLD}Profile:{RESET} "
-            f"{GREEN}{profile.name}{RESET} {DIM}({profile.alias}){RESET}"
-        )
-    elif alias:
-        print(f"{BOLD}Profile:{RESET} {DIM}{alias}{RESET}")
-    print()
-    print(ACTIVE_CONFIG_PATH.read_text())
-
-
 def cmd_version(_args: argparse.Namespace) -> None:
     print(f"omoctl {__version__}")
+
+
+def _add_status_flags(p: argparse.ArgumentParser) -> None:
+    group = p.add_mutually_exclusive_group()
+    group.add_argument(
+        "-a", "--alias", action="store_true",
+        help="Print only the active profile alias",
+    )
+    group.add_argument(
+        "-n", "--name", action="store_true",
+        help="Print only the active profile name",
+    )
+    group.add_argument(
+        "-j", "--json", action="store_true",
+        help="Print only the raw JSON config",
+    )
 
 
 def main() -> None:
@@ -217,45 +216,44 @@ def main() -> None:
         action="version",
         version=f"omoctl {__version__}",
     )
+    _add_status_flags(parser)
     parser.set_defaults(func=cmd_status)
 
     sub = parser.add_subparsers(dest="command")
 
-    list_p = sub.add_parser("list", help="List all profiles")
+    status_p = sub.add_parser("status", help="Show active profile (default)")
+    _add_status_flags(status_p)
+    status_p.set_defaults(func=cmd_status)
+
+    list_p = sub.add_parser("list", aliases=["ls"], help="List all profiles")
     list_p.set_defaults(func=cmd_list)
 
-    switch_p = sub.add_parser("switch", help="Switch to a profile")
-    switch_p.add_argument("profile", help="Profile name or alias")
-    switch_p.set_defaults(func=cmd_switch)
+    use_p = sub.add_parser(
+        "use", aliases=["apply", "switch"], help="Activate a profile",
+    )
+    use_p.add_argument("profile", help="Profile name or alias")
+    use_p.set_defaults(func=cmd_use)
 
-    update_p = sub.add_parser("update", help="Update profiles (fetch + patch + save)")
+    update_p = sub.add_parser(
+        "update",
+        aliases=["build", "upgrade"],
+        help="Update profiles (fetch + patch + save)",
+    )
     update_p.add_argument("profile", nargs="?", default=None, help="Profile name or alias (all if omitted)")
     update_p.set_defaults(func=cmd_update)
 
-    remove_p = sub.add_parser("remove", help="Remove a stored profile")
+    remove_p = sub.add_parser(
+        "remove", aliases=["rm"], help="Remove a stored profile",
+    )
     remove_p.add_argument("profile", help="Profile name or alias")
     remove_p.set_defaults(func=cmd_remove)
 
-    validate_p = sub.add_parser("validate", help="Validate config against available models/agents")
-    validate_p.set_defaults(func=cmd_validate)
-
-    show_p = sub.add_parser(
-        "show", help="Show the active profile (header + JSON by default)"
+    check_p = sub.add_parser(
+        "check",
+        aliases=["validate"],
+        help="Check config against available models/agents",
     )
-    show_mode = show_p.add_mutually_exclusive_group()
-    show_mode.add_argument(
-        "-a", "--alias", action="store_true",
-        help="Print only the active profile alias",
-    )
-    show_mode.add_argument(
-        "-n", "--name", action="store_true",
-        help="Print only the active profile name",
-    )
-    show_mode.add_argument(
-        "-j", "--json", action="store_true",
-        help="Print only the raw JSON config (no header)",
-    )
-    show_p.set_defaults(func=cmd_show)
+    check_p.set_defaults(func=cmd_check)
 
     version_p = sub.add_parser("version", help="Print version")
     version_p.set_defaults(func=cmd_version)

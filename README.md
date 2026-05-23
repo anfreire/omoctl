@@ -19,7 +19,7 @@ uv tool install omoctl
 omoctl --help
 ```
 
-> Examples in this README use the bare `omoctl` form. If you prefer `uvx`, prefix every command (`uvx omoctl update`, `uvx omoctl switch claude`, ...).
+> Examples in this README use the bare `omoctl` form. If you prefer `uvx`, prefix every command (`uvx omoctl update`, `uvx omoctl use claude`, ...).
 
 ### Prerequisites
 
@@ -32,23 +32,22 @@ omoctl --help
 ```bash
 omoctl update          # fetch & build all profiles
 omoctl list            # see what's available
-omoctl switch claude   # activate a profile
+omoctl use claude      # activate a profile
 omoctl                 # show active profile
-omoctl validate        # check config against available models/agents
+omoctl check           # check config against available models/agents
 ```
 
 ## Commands
 
-| Command | Description |
-|---|---|
-| `omoctl` | Show active profile |
-| `omoctl list` | List all profiles |
-| `omoctl switch <profile>` | Switch to a profile (by name or alias) |
-| `omoctl update [profile]` | Fetch fresh OMO configs, apply patches, save. All profiles if omitted |
-| `omoctl remove <profile>` | Remove a stored profile |
-| `omoctl validate` | Validate config against available models, agents, and categories |
-| `omoctl show [-a\|-n\|-j]` | Show active profile: header + JSON by default; `-a` alias only, `-n` name only, `-j` JSON only |
-| `omoctl version` | Print version |
+| Command | Aliases | Description |
+|---|---|---|
+| `omoctl [status]` | — | Show active profile. Use `-a`/`-n`/`-j` to print only the alias, name, or JSON (e.g. `omoctl -j`) |
+| `omoctl list` | `ls` | List all profiles |
+| `omoctl use <profile>` | `apply`, `switch` | Activate a profile (by name or alias) |
+| `omoctl update [profile]` | `build`, `upgrade` | Fetch fresh OMO configs, apply patches, save. All profiles if omitted |
+| `omoctl remove <profile>` | `rm` | Remove a stored profile |
+| `omoctl check` | `validate` | Check config against available models, agents, and categories |
+| `omoctl version` | — | Print version |
 
 ## Config
 
@@ -109,7 +108,7 @@ profiles:
 | Field | Type | Description |
 |---|---|---|
 | `name` | string | **Required.** Display name. Also determines the alias (e.g. `"No Copilot"` -> `no-copilot`) |
-| `providers` | list | **Required.** OMO providers to enable. Run `omoctl validate` to see available providers |
+| `providers` | list | **Required.** OMO providers to enable. Run `omoctl check` to see available providers |
 | `patches` | list | Profile-specific patches. Take priority over global patches |
 | `overrides` | dict | OMO config overrides. Deep-merged on top of the global `overrides` |
 
@@ -205,7 +204,7 @@ Model IDs are split into words and numbers (e.g. `claude-opus-4-7` -> words: `[c
 
 ## Validation
 
-`omoctl validate` checks your config against live data:
+`omoctl check` checks your config against live data:
 
 - Patch source/target **providers** exist in the model cache
 - Patch source/target **models** exist in their provider
