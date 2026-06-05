@@ -4,9 +4,7 @@ import os
 import sys
 import typing
 
-_USE_COLOR: typing.Final[bool] = (
-    sys.stdout.isatty() and "NO_COLOR" not in os.environ
-)
+_USE_COLOR: typing.Final[bool] = sys.stdout.isatty() and "NO_COLOR" not in os.environ
 
 BOLD: typing.Final[str] = "\033[1m" if _USE_COLOR else ""
 DIM: typing.Final[str] = "\033[2m" if _USE_COLOR else ""
@@ -42,8 +40,47 @@ def parse_section_label(agent_type: str) -> str:
     )
 
 
+def _format_fallback_entry(fb: dict) -> str:
+    model = fb.get("model", "?")
+    variant = fb.get("variant")
+    if variant is not None:
+        return f"{model} (variant: {variant})"
+    return model
+
+
+def _print_fallbacks_dim(fallbacks: list[dict]) -> None:
+    if not fallbacks:
+        return
+    print(f"    {DIM}fallback_models:{RESET}")
+    for i, fb in enumerate(fallbacks, 1):
+        print(f"      {DIM}{i}. {_format_fallback_entry(fb)}{RESET}")
+
+
+def _print_fallbacks_diff(
+    old_fallbacks: list[dict],
+    new_fallbacks: list[dict],
+) -> None:
+    print(f"    {BOLD}fallback_models:{RESET}")
+    max_len = max(len(old_fallbacks), len(new_fallbacks))
+    for i in range(max_len):
+        old_fb = old_fallbacks[i] if i < len(old_fallbacks) else None
+        new_fb = new_fallbacks[i] if i < len(new_fallbacks) else None
+        if old_fb is not None and new_fb is not None:
+            if old_fb == new_fb:
+                print(f"      {DIM}{i + 1}. {_format_fallback_entry(old_fb)}{RESET}")
+            else:
+                print(f"      {RED}- {i + 1}. {_format_fallback_entry(old_fb)}{RESET}")
+                print(
+                    f"      {GREEN}+ {i + 1}. {_format_fallback_entry(new_fb)}{RESET}"
+                )
+        elif old_fb is not None:
+            print(f"      {RED}- {i + 1}. {_format_fallback_entry(old_fb)}{RESET}")
+        else:
+            print(f"      {GREEN}+ {i + 1}. {_format_fallback_entry(new_fb)}{RESET}")
+
+
 def print_diff(
-    curr_config: dict | None,
+    curr_config: dict,
     patched_config: dict,
     keys: list[tuple[str, str]],
 ) -> None:
@@ -54,6 +91,8 @@ def print_diff(
         curr_entry = curr_config.get(section, {}).get(name)
         patched_entry = patched_config[section][name]
         label = parse_section_label(section)
+
+        print()
 
         if curr_entry is None:
             print(f"{GREEN}+  {BOLD}{label} {name!r}{RESET}")
@@ -69,12 +108,17 @@ def print_diff(
                 changes.append((key, old_val, new_val))
 
         if not changes:
-            print(f"  {DIM}{label} {name!r}{RESET}")
+            print(f"  {BOLD}{DIM}{label} {name!r}{RESET}")
             print(f"    {DIM}model: {patched_entry.get('model', '?')}{RESET}")
+            _print_fallbacks_dim(patched_entry.get("fallback_models", []))
             continue
 
         print(f"  {BOLD}{label} {name!r}{RESET}")
         for key, old_val, new_val in changes:
+            if key == "fallback_models" and isinstance(new_val, list):
+                old_list = old_val if isinstance(old_val, list) else []
+                _print_fallbacks_diff(old_list, new_val)
+                continue
             if old_val is None:
                 print(f"    {GREEN}+ {key}: {new_val}{RESET}")
             else:
@@ -93,8 +137,6 @@ def print_profile_list(
         print(f"    {DIM}providers: {providers_str}{RESET}")
 
 
-def print_profile_status(
-    name: str, alias: str, providers: list[str]
-) -> None:
+def print_profile_status(name: str, alias: str, providers: list[str]) -> None:
     print(f"{BOLD}Active profile:{RESET} {GREEN}{name}{RESET} {DIM}({alias}){RESET}")
     print(f"{DIM}Providers: {', '.join(providers)}{RESET}")

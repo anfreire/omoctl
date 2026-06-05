@@ -25,7 +25,7 @@ omoctl --help
 
 - Python 3.11+
 - [bun](https://bun.sh) or [npm](https://nodejs.org) (for fetching OMO configs via `oh-my-opencode`)
-- OpenCode installed with a populated model cache (`~/.cache/opencode/models.json` — run `opencode` once to seed it)
+- [OpenCode](https://opencode.ai) installed and on `PATH` (used to list models)
 
 ## Quick Start
 
@@ -41,13 +41,13 @@ omoctl check           # check config against available models/agents
 
 | Command | Aliases | Description |
 |---|---|---|
-| `omoctl [status]` | — | Show active profile. Use `-a`/`-n`/`-j` to print only the alias, name, or JSON (e.g. `omoctl -j`) |
+| `omoctl [show]` | `current`, `status` | Show active profile. Use `-a`/`-n`/`-j` to print only the alias, name, or JSON (e.g. `omoctl -j`) |
 | `omoctl list` | `ls` | List all profiles |
 | `omoctl use <profile>` | `apply`, `switch` | Activate a profile (by name or alias) |
 | `omoctl update [profile]` | `build`, `upgrade` | Fetch fresh OMO configs, apply patches, save. All profiles if omitted |
 | `omoctl remove <profile>` | `rm` | Remove a stored profile |
-| `omoctl check` | `validate` | Check config against available models, agents, and categories |
-| `omoctl version` | — | Print version |
+| `omoctl check` | `validate`, `verify` | Check config against available models, agents, and categories |
+| `omoctl version` | — | Print version. Also available as `-v` |
 
 ## Config
 
@@ -101,6 +101,7 @@ profiles:
 | `active_profile` | string | Profile to auto-activate after `update`. Optional |
 | `overrides` | dict | OMO config overrides applied to all profiles |
 | `patches` | list | Global patches applied to all profiles (see [Patches](#patches)) |
+| `remove_fallbacks` | list | Global rules for dropping entries from `fallback_models` lists. Each entry is a source matcher (see [Removing Fallbacks](#removing-fallbacks)) |
 | `profiles` | list | Profile definitions (at least one required) |
 
 ### Profile fields
@@ -111,6 +112,7 @@ profiles:
 | `providers` | list | **Required.** OMO providers to enable. Run `omoctl check` to see available providers |
 | `patches` | list | Profile-specific patches. Take priority over global patches |
 | `overrides` | dict | OMO config overrides. Deep-merged on top of the global `overrides` |
+| `remove_fallbacks` | list | Profile-specific fallback-removal rules. Added to the global `remove_fallbacks` |
 
 ## Patches
 
@@ -164,6 +166,41 @@ patches:
 2. Agent/category patches take priority over provider-only patches
 3. Exact model matches beat filter matches
 4. More specific filters beat less specific ones
+
+## Removing Fallbacks
+
+`remove_fallbacks` drops specific entries from the `fallback_models` lists that OMO ships with, before patches are applied. Each entry is a flat object with the same matcher fields used in [Patches](#patches):
+
+| Field | Type | Description |
+|---|---|---|
+| `provider` | string | Match fallbacks from this provider (e.g. `openai`, `anthropic`) |
+| `model` | string, list, or dict | Filter which models to match (see [Model Filters](#model-filters)) |
+| `agent` | string | Only apply to fallbacks belonging to this agent (e.g. `sisyphus`) |
+| `category` | string | Only apply to fallbacks belonging to this category (e.g. `deep`) |
+
+At least one of `provider`, `agent`, or `category` must be set. Matching is done against the **original** OMO model — not the post-patch model. So a fallback that would have been rewritten by a patch is still removed if its original model matches.
+
+### Examples
+
+```yaml
+# Remove a specific model from all fallback lists globally
+remove_fallbacks:
+  - provider: openai
+    model: gpt-4-mini
+
+# Remove all fallbacks for a specific agent matching a filter
+profiles:
+  - name: No Copilot
+    providers: [claude, gemini, openai]
+    remove_fallbacks:
+      - agent: sisyphus
+        provider: openai
+```
+
+### Priority
+
+1. Profile `remove_fallbacks` are applied alongside global `remove_fallbacks` (any match removes the entry)
+2. The first matching entry removes the fallback; remaining rules are not evaluated for that entry
 
 ## Model Filters
 

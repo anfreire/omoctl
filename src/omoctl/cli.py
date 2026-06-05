@@ -1,13 +1,10 @@
 from __future__ import annotations
-
 import argparse
 import sys
-
 from omoctl import __version__
 from omoctl.config import load_config
-from omoctl.models import enrich_cache_with_omo, load_model_cache
+from omoctl.models import ModelCache, enrich_cache_with_omo, load_models
 from omoctl.omo import fetch_omo_config
-from omoctl.validate import print_validation_result, validate_config
 from omoctl.output import (
     BOLD,
     DIM,
@@ -19,16 +16,17 @@ from omoctl.output import (
     print_profile_status,
     print_section,
 )
-from omoctl.paths import ACTIVE_CONFIG_PATH
 from omoctl.patching import apply_patches_to_config
+from omoctl.paths import ACTIVE_CONFIG_PATH
 from omoctl.store import (
     activate_profile,
     cleanup_stale,
     get_active_alias,
     get_profile_config,
-    save_profile,
     remove_profile,
+    save_profile,
 )
+from omoctl.validate import print_validation_result, validate_config
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -79,13 +77,9 @@ def cmd_status(args: argparse.Namespace) -> None:
 def cmd_list(_args: argparse.Namespace) -> None:
     config = load_config()
     active_profile = config.get_active_profile()
-    active_alias = (
-        active_profile.alias if active_profile else get_active_alias()
-    )
+    active_alias = active_profile.alias if active_profile else get_active_alias()
 
-    profiles = [
-        (p.name, p.alias, p.providers) for p in config.profiles
-    ]
+    profiles = [(p.name, p.alias, p.providers) for p in config.profiles]
 
     if not profiles:
         print(f"{DIM}No profiles defined in config.{RESET}")
@@ -99,7 +93,9 @@ def cmd_use(args: argparse.Namespace) -> None:
     profile = config.find_profile(args.profile)
 
     if profile is None:
-        die(f"Profile {args.profile!r} not found. Run 'omoctl list' to see available profiles.")
+        die(
+            f"Profile {args.profile!r} not found. Run 'omoctl list' to see available profiles."
+        )
 
     stored_config = get_profile_config(profile.alias)
     if stored_config is None:
@@ -123,7 +119,9 @@ def cmd_update(args: argparse.Namespace) -> None:
     else:
         profiles = list(config.profiles)
 
-    cache = load_model_cache()
+    print(f"{DIM}Refreshing model list from opencode...{RESET}\n")
+    provider_to_models = load_models(refresh=True)
+    cache = ModelCache(provider_to_models=provider_to_models)
 
     active_profile = config.get_active_profile()
     active_alias = active_profile.alias if active_profile else get_active_alias()
@@ -140,7 +138,10 @@ def cmd_update(args: argparse.Namespace) -> None:
         curr_config = get_profile_config(profile.alias)
 
         patched_config, keys = apply_patches_to_config(
-            enriched_cache, profile, omo_config, config,
+            enriched_cache,
+            profile,
+            omo_config,
+            config,
         )
 
         save_profile(profile.alias, profile.name, patched_config)
@@ -168,12 +169,15 @@ def cmd_remove(args: argparse.Namespace) -> None:
 
     remove_profile(profile.alias)
     print(f"{GREEN}Removed profile: {BOLD}{profile.name}{RESET}")
-    print(f"{DIM}Note: the profile definition is still in config.yaml. Edit it to remove permanently.{RESET}")
+    print(
+        f"{DIM}Note: the profile definition is still in config.yaml. Edit it to remove permanently.{RESET}"
+    )
 
 
 def cmd_check(_args: argparse.Namespace) -> None:
     config = load_config()
-    cache = load_model_cache()
+    provider_to_models = load_models(refresh=False)
+    cache = ModelCache(provider_to_models=provider_to_models)
 
     all_providers = set()
     for profile in config.profiles:
@@ -193,15 +197,21 @@ def cmd_version(_args: argparse.Namespace) -> None:
 def _add_status_flags(p: argparse.ArgumentParser) -> None:
     group = p.add_mutually_exclusive_group()
     group.add_argument(
-        "-a", "--alias", action="store_true",
+        "-a",
+        "--alias",
+        action="store_true",
         help="Print only the active profile alias",
     )
     group.add_argument(
-        "-n", "--name", action="store_true",
+        "-n",
+        "--name",
+        action="store_true",
         help="Print only the active profile name",
     )
     group.add_argument(
-        "-j", "--json", action="store_true",
+        "-j",
+        "--json",
+        action="store_true",
         help="Print only the raw JSON config",
     )
 
@@ -212,6 +222,7 @@ def main() -> None:
         description="Manage oh-my-openagent (OMO) profiles",
     )
     parser.add_argument(
+        "-v",
         "--version",
         action="version",
         version=f"omoctl {__version__}",
@@ -221,15 +232,21 @@ def main() -> None:
 
     sub = parser.add_subparsers(dest="command")
 
-    status_p = sub.add_parser("status", help="Show active profile (default)")
-    _add_status_flags(status_p)
-    status_p.set_defaults(func=cmd_status)
+    show_p = sub.add_parser(
+        "show",
+        aliases=["current", "status"],
+        help="Show active profile (default)",
+    )
+    _add_status_flags(show_p)
+    show_p.set_defaults(func=cmd_status)
 
     list_p = sub.add_parser("list", aliases=["ls"], help="List all profiles")
     list_p.set_defaults(func=cmd_list)
 
     use_p = sub.add_parser(
-        "use", aliases=["apply", "switch"], help="Activate a profile",
+        "use",
+        aliases=["apply", "switch"],
+        help="Activate a profile",
     )
     use_p.add_argument("profile", help="Profile name or alias")
     use_p.set_defaults(func=cmd_use)
@@ -239,18 +256,25 @@ def main() -> None:
         aliases=["build", "upgrade"],
         help="Update profiles (fetch + patch + save)",
     )
-    update_p.add_argument("profile", nargs="?", default=None, help="Profile name or alias (all if omitted)")
+    update_p.add_argument(
+        "profile",
+        nargs="?",
+        default=None,
+        help="Profile name or alias (all if omitted)",
+    )
     update_p.set_defaults(func=cmd_update)
 
     remove_p = sub.add_parser(
-        "remove", aliases=["rm"], help="Remove a stored profile",
+        "remove",
+        aliases=["rm"],
+        help="Remove a stored profile",
     )
     remove_p.add_argument("profile", help="Profile name or alias")
     remove_p.set_defaults(func=cmd_remove)
 
     check_p = sub.add_parser(
         "check",
-        aliases=["validate"],
+        aliases=["validate", "verify"],
         help="Check config against available models/agents",
     )
     check_p.set_defaults(func=cmd_check)

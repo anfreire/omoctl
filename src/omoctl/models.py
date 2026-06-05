@@ -1,14 +1,13 @@
 from __future__ import annotations
-
 import dataclasses
 import itertools
-import json
 import re
+import shutil
+import subprocess
 import typing
-
 from omoctl.output import die
-from omoctl.paths import CACHED_MODELS_PATH, CUSTOM_MODELS_PATH
 from omoctl.types import ModelFilter, ModelProps
+
 
 DATED_MODEL_PATTERN: typing.Final[re.Pattern] = re.compile(
     r".*("
@@ -27,52 +26,46 @@ class ModelCache:
     category_names: tuple[str, ...] = ()
 
 
-def load_model_cache() -> ModelCache:
-    if not CACHED_MODELS_PATH.exists():
-        die(
-            f"Model cache not found at {CACHED_MODELS_PATH}.\n"
-            f"  Run 'opencode' once to populate it."
-        )
+def _find_opencode() -> str:
+    opencode = shutil.which("opencode")
+    if opencode:
+        return opencode
+    die("'opencode' binary not found in PATH. Install it from https://opencode.ai")
+
+
+def load_models(refresh: bool = False) -> dict[str, tuple[str, ...]]:
+    """Run `opencode models [--refresh]` and parse `<provider>/<model>` lines."""
+    opencode = _find_opencode()
+
+    cmd = [opencode, "models"]
+    if refresh:
+        cmd.append("--refresh")
 
     try:
-        with CACHED_MODELS_PATH.open() as f:
-            data = json.load(f)
-    except json.JSONDecodeError as e:
-        die(f"Model cache at {CACHED_MODELS_PATH} is malformed:\n  {e}")
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError) as e:
+        die(f"Failed to query opencode models:\n  {e}")
 
-    custom_data: dict = {}
-    if CUSTOM_MODELS_PATH.exists():
-        try:
-            with CUSTOM_MODELS_PATH.open() as f:
-                custom_data = json.load(f).get("provider", {})
-        except json.JSONDecodeError as e:
-            die(f"Custom models at {CUSTOM_MODELS_PATH} is malformed:\n  {e}")
-
-    providers = set(data.keys()) | set(custom_data.keys())
-
-    provider_to_models: dict[str, tuple[str, ...]] = {}
-    for provider in providers:
-        models: set[str] = set()
-        for source_data in (data, custom_data):
-            if provider in source_data and "models" in source_data[provider]:
-                provider_models = source_data[provider]["models"]
-                if isinstance(provider_models, dict):
-                    models.update(provider_models.keys())
-
-        provider_to_models[provider] = tuple(
-            sorted(
-                models,
-                key=lambda model_id: (
-                    bool(DATED_MODEL_PATTERN.match(model_id)),
-                    not model_id.endswith("latest"),
-                    len(model_id),
-                ),
-            )
+    if result.returncode != 0:
+        die(
+            "Failed to query opencode models:\n"
+            f"  {(result.stderr or result.stdout or '').strip()}"
         )
 
-    return ModelCache(
-        provider_to_models=provider_to_models,
-    )
+    provider_to_models: dict[str, set[str]] = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line or "/" not in line:
+            continue
+        provider, _, model = line.partition("/")
+        provider_to_models.setdefault(provider, set()).add(model)
+
+    return {p: tuple(sorted(models)) for p, models in provider_to_models.items()}
 
 
 def enrich_cache_with_omo(cache: ModelCache, omo_config: dict) -> ModelCache:

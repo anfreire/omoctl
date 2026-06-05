@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from omoctl.config import Config, Patch, Profile, merge_dicts
+from omoctl.config import Config, Patch, PatchSource, Profile, merge_dicts
 from omoctl.models import ModelCache, find_best_matching_model
 from omoctl.output import die
 from omoctl.types import ModelProps, _UNSET, parse_model_spec
 
 
-def _match_agent_or_category(
-    patch: Patch, section: str, name: str
-) -> bool:
+def _match_agent_or_category(patch: Patch, section: str, name: str) -> bool:
     src = patch.source
     if section == "agents" and src.agent:
         return src.agent == name
@@ -108,7 +106,8 @@ def patch_model(
                 if not matched:
                     continue
         return _resolve_target(
-            cache, patch,
+            cache,
+            patch,
             model.split("/", 1)[0] if "/" in model else None,
             model.split("/", 1)[1] if "/" in model else model,
         )
@@ -135,21 +134,84 @@ def patch_model(
     return _resolve_target(cache, best[1], provider, model_id)
 
 
+def _fallback_matches_remove(
+    fb: dict,
+    section: str,
+    name: str,
+    remove_fallbacks: list[PatchSource],
+) -> bool:
+    if "model" not in fb:
+        return False
+    fb_model = fb["model"]
+    if "/" not in fb_model:
+        return False
+    fb_provider, _, fb_model_id = fb_model.partition("/")
+
+    for source in remove_fallbacks:
+        if source.agent is not None and not (
+            section == "agents" and source.agent == name
+        ):
+            continue
+        if source.category is not None and not (
+            section == "categories" and source.category == name
+        ):
+            continue
+
+        if source.provider is not None and source.provider != fb_provider:
+            continue
+
+        spec = parse_model_spec(source.model)
+
+        if isinstance(spec, str):
+            if spec == fb_model_id:
+                return True
+            continue
+
+        if spec is None:
+            return True
+
+        props = ModelProps.from_model_id(fb_model_id)
+        if props is None:
+            continue
+
+        if any(w in props.words for w in spec.words_exclude):
+            continue
+        if any(n in props.numbers for n in spec.numbers_exclude):
+            continue
+        if not all(w in props.words for w in spec.words_include):
+            continue
+        if not all(n in props.numbers for n in spec.numbers_include):
+            continue
+
+        return True
+
+    return False
+
+
 def _patch_fallbacks(
     cache: ModelCache,
     section: str,
     name: str,
     fallbacks: list[dict],
     patches: list[Patch],
+    remove_fallbacks: list[PatchSource] = (),
 ) -> list[dict]:
     result = []
     for fb in fallbacks:
+        if remove_fallbacks and _fallback_matches_remove(
+            fb, section, name, remove_fallbacks
+        ):
+            continue
         if "model" not in fb:
             result.append(fb)
             continue
         patched_fb = fb.copy()
         patched_model, patched_variant = patch_model(
-            cache, section, name, fb["model"], patches,
+            cache,
+            section,
+            name,
+            fb["model"],
+            patches,
         )
         patched_fb["model"] = patched_model
         if patched_variant is not _UNSET:
@@ -171,12 +233,15 @@ def apply_patches_to_config(
         if field not in omo_config:
             die(f"OMO config missing '{field}' field.")
 
-    patches = config.get_effective_patches(profile) if config else (profile.patches or [])
-    overrides = (
-        config.get_effective_overrides(profile)
-        if config
-        else profile.overrides
+    patches = (
+        config.get_effective_patches(profile) if config else (profile.patches or [])
     )
+    remove_fallbacks = (
+        config.get_effective_remove_fallbacks(profile)
+        if config
+        else (profile.remove_fallbacks or [])
+    )
+    overrides = config.get_effective_overrides(profile) if config else profile.overrides
 
     patched_config: dict = {
         "$schema": omo_config["$schema"],
@@ -199,7 +264,11 @@ def apply_patches_to_config(
 
         patched_entry = entry.copy()
         patched_model, patched_variant = patch_model(
-            cache, section, name, entry["model"], patches,
+            cache,
+            section,
+            name,
+            entry["model"],
+            patches,
         )
         patched_entry["model"] = patched_model
         if patched_variant is not _UNSET:
@@ -210,7 +279,12 @@ def apply_patches_to_config(
 
         if "fallback_models" in patched_entry:
             patched_entry["fallback_models"] = _patch_fallbacks(
-                cache, section, name, patched_entry["fallback_models"], patches,
+                cache,
+                section,
+                name,
+                patched_entry["fallback_models"],
+                patches,
+                remove_fallbacks,
             )
 
         patched_config[section][name] = patched_entry

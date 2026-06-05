@@ -75,9 +75,7 @@ class ModelFilter:
                 )
             if not sub_raw:
                 continue
-            words, numbers = split_words_numbers(
-                tuple(str(w).lower() for w in sub_raw)
-            )
+            words, numbers = split_words_numbers(tuple(str(w).lower() for w in sub_raw))
             kwargs[f"words_{key}"] = words
             kwargs[f"numbers_{key}"] = numbers
 

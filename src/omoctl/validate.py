@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from omoctl.config import Config, Patch
+from omoctl.config import Config, Patch, PatchSource
 from omoctl.models import ModelCache
 from omoctl.omo import get_available_providers
 from omoctl.output import BOLD, GREEN, RED, RESET
@@ -18,8 +18,25 @@ def validate_config(config: Config, cache: ModelCache) -> list[str]:
     if config.patches:
         for i, patch in enumerate(config.patches):
             _validate_patch(
-                patch, f"global patch [{i}]",
-                model_providers, known_agents, known_categories, cache, errors,
+                patch,
+                f"global patch [{i}]",
+                model_providers,
+                known_agents,
+                known_categories,
+                cache,
+                errors,
+            )
+
+    if config.remove_fallbacks:
+        for i, source in enumerate(config.remove_fallbacks):
+            _validate_remove_fallback(
+                source,
+                f"global remove_fallbacks [{i}]",
+                model_providers,
+                known_agents,
+                known_categories,
+                cache,
+                errors,
             )
 
     for profile in config.profiles:
@@ -39,8 +56,25 @@ def validate_config(config: Config, cache: ModelCache) -> list[str]:
         if profile.patches:
             for i, patch in enumerate(profile.patches):
                 _validate_patch(
-                    patch, f"{ctx} patch [{i}]",
-                    model_providers, known_agents, known_categories, cache, errors,
+                    patch,
+                    f"{ctx} patch [{i}]",
+                    model_providers,
+                    known_agents,
+                    known_categories,
+                    cache,
+                    errors,
+                )
+
+        if profile.remove_fallbacks:
+            for i, source in enumerate(profile.remove_fallbacks):
+                _validate_remove_fallback(
+                    source,
+                    f"{ctx} remove_fallbacks [{i}]",
+                    model_providers,
+                    known_agents,
+                    known_categories,
+                    cache,
+                    errors,
                 )
 
     return errors
@@ -76,10 +110,14 @@ def _validate_patch(
     if src.provider and isinstance(src.model, str):
         models = cache.provider_to_models.get(src.provider, ())
         if src.model not in models:
-            errors.append(f"{ctx}: source model {src.model!r} not in provider {src.provider!r}.")
+            errors.append(
+                f"{ctx}: source model {src.model!r} not in provider {src.provider!r}."
+            )
 
     if not src.provider and not src.agent and not src.category:
-        errors.append(f"{ctx}: source must specify at least provider, agent, or category.")
+        errors.append(
+            f"{ctx}: source must specify at least provider, agent, or category."
+        )
 
     if not tgt.provider and not tgt.model and tgt.variant is _UNSET:
         errors.append(
@@ -92,7 +130,46 @@ def _validate_patch(
     if tgt.provider and isinstance(tgt.model, str):
         models = cache.provider_to_models.get(tgt.provider, ())
         if tgt.model not in models:
-            errors.append(f"{ctx}: target model {tgt.model!r} not in provider {tgt.provider!r}.")
+            errors.append(
+                f"{ctx}: target model {tgt.model!r} not in provider {tgt.provider!r}."
+            )
+
+
+def _validate_remove_fallback(
+    source: PatchSource,
+    ctx: str,
+    model_providers: set[str],
+    known_agents: set[str],
+    known_categories: set[str],
+    cache: ModelCache,
+    errors: list[str],
+) -> None:
+    if not source.provider and not source.agent and not source.category:
+        errors.append(
+            f"{ctx}: source must specify at least provider, agent, or category."
+        )
+
+    if source.provider and source.provider not in model_providers:
+        errors.append(f"{ctx}: source provider {source.provider!r} not found.")
+
+    if source.agent and known_agents and source.agent not in known_agents:
+        errors.append(
+            f"{ctx}: source agent {source.agent!r} not found. "
+            f"Available: {', '.join(sorted(known_agents))}"
+        )
+
+    if source.category and known_categories and source.category not in known_categories:
+        errors.append(
+            f"{ctx}: source category {source.category!r} not found. "
+            f"Available: {', '.join(sorted(known_categories))}"
+        )
+
+    if source.provider and isinstance(source.model, str):
+        models = cache.provider_to_models.get(source.provider, ())
+        if source.model not in models:
+            errors.append(
+                f"{ctx}: source model {source.model!r} not in provider {source.provider!r}."
+            )
 
 
 def print_validation_result(errors: list[str]) -> bool:

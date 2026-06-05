@@ -39,6 +39,7 @@ class Profile:
     providers: list[str] = dataclasses.field(default_factory=list)
     patches: list[Patch] | None = None
     overrides: dict | None = None
+    remove_fallbacks: list[PatchSource] | None = None
 
     @property
     def alias(self) -> str:
@@ -50,6 +51,7 @@ class Config:
     active_profile: str | None = None
     overrides: dict | None = None
     patches: list[Patch] | None = None
+    remove_fallbacks: list[PatchSource] | None = None
     profiles: list[Profile] = dataclasses.field(default_factory=list)
 
     def find_profile(self, name_or_alias: str) -> Profile | None:
@@ -70,6 +72,14 @@ class Config:
             result.extend(profile.patches)
         if self.patches:
             result.extend(self.patches)
+        return result
+
+    def get_effective_remove_fallbacks(self, profile: Profile) -> list[PatchSource]:
+        result: list[PatchSource] = []
+        if profile.remove_fallbacks:
+            result.extend(profile.remove_fallbacks)
+        if self.remove_fallbacks:
+            result.extend(self.remove_fallbacks)
         return result
 
     def get_effective_overrides(self, profile: Profile) -> dict | None:
@@ -96,22 +106,72 @@ def merge_dicts(
 _DACITE_CONFIG = dacite.Config(check_types=True, strict=True)
 
 _DEFAULT_YAML = """\
-# active_profile: my-profile
+# omoctl default config. This is verbose on purpose so you can see every
+# option that exists. Uncomment, edit, or delete what you don't need.
+# Run `omoctl check` to validate the config against live data.
 
+# Auto-activate this profile after `omoctl update`. Optional.
+# active_profile: Claude
+
+# OMO config overrides applied to all profiles (deep-merged into the
+# final OMO config). See the oh-my-openagent schema for valid keys.
 overrides:
   disabled_hooks:
     - context-window-monitor
 
+# Global patches applied to all profiles. Profile patches take priority.
+# A patch rewrites a model when its source matches; see the README for
+# the full matcher syntax (provider / model / agent / category).
 # patches:
-#   - source: { provider: google }
-#     target: { provider: proxy }
+#   - source: { provider: anthropic, model: claude-sonnet-4-6 }
+#     target: { model: claude-opus-4-6 }
+#   - { source: { provider: anthropic, model: [opus] }, target: { model: claude-opus-4-6 } }
+#   - source:
+#       provider: anthropic
+#       model:
+#         include: [claude]
+#         exclude: [haiku]
+#     target: { model: claude-sonnet-4-6 }
+#   - source: { agent: sisyphus }
+#     target: { provider: openai, model: gpt-5.4 }
+#   - source: { category: ultrabrain }
+#     target: { provider: openai, model: gpt-5.4, variant: xhigh }
+#   - source: { agent: sisyphus, model: claude-opus-4-7 }
+#     target: { variant: null }
+
+# Drop these models from any agent's or category's fallback_models lists.
+# Match is done against the ORIGINAL OMO model (not the post-patch model).
+# Each entry uses the same source fields as patches: provider, model,
+# agent, category. At least one of provider / agent / category must be set.
+# remove_fallbacks:
+#   - provider: openai
+#     model: gpt-5.5-fast
+#   - { agent: sisyphus, provider: openai }
 
 profiles:
   - name: Claude
     providers: [claude]
+    # Per-profile overrides are deep-merged on top of global overrides.
+    # overrides:
+    #   claude_code:
+    #     agents: false
+    #     commands: false
+    #     hooks: false
+    #     mcp: false
+    #     plugins: false
+    #     skills: false
 
-  - name: No Copilot
-    providers: [claude, gemini, openai]
+
+  - name: Default
+    providers: [claude, openai, gemini]
+    # Per-profile patches take priority over global patches.
+    # patches:
+    #   - source: { provider: openai, model: gpt-5.4-mini-fast }
+    #     target: { model: gpt-5.4-mini }
+    # Per-profile remove_fallbacks add to the global list.
+    # remove_fallbacks:
+    #   - provider: openai
+    #     model: gpt-5.5
 """
 
 

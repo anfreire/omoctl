@@ -36,7 +36,9 @@ def get_available_providers() -> tuple[str, ...]:
     try:
         result = subprocess.run(
             [*runner, "oh-my-opencode", "install", "--help"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
     except (subprocess.SubprocessError, FileNotFoundError) as e:
         die(f"Failed to query oh-my-opencode:\n  {e}")
@@ -84,12 +86,13 @@ def fetch_omo_config(
         try:
             subprocess.run(
                 [*runner, "oh-my-opencode", "install", "--no-tui", *kwargs],
-                check=True, capture_output=True, text=True,
+                check=True,
+                capture_output=True,
+                text=True,
             )
         except subprocess.CalledProcessError as e:
             die(
-                "Failed to fetch OMO config:\n"
-                f"  {(e.stderr or e.stdout or '').strip()}"
+                f"Failed to fetch OMO config:\n  {(e.stderr or e.stdout or '').strip()}"
             )
         except (subprocess.SubprocessError, FileNotFoundError) as e:
             die(f"Failed to run oh-my-opencode: {e}")
