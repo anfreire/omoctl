@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-06
+
+### Changed
+
+- `update` diff now uses set-based comparison for `fallback_models` instead of positional indexing. Removals, additions, and kept entries are determined by content, not list position — reordering the same set no longer produces spurious churn.
+- Unchanged and kept fallback entries use space-aligned indentation (no marker) instead of numbered bullets. Only real changes get `- ` (removed) or `+ ` (added) markers, making diffs unambiguous in both color and no-color output.
+- When an entry has changes, the `model` line and `fallback_models` are always shown for context — previously changing one would hide the other.
+- New entries (first build) now display `variant` and other non-model keys alongside `model` and `fallback_models`.
+
 ## [0.3.0] - 2026-06-05
 
 ### Added

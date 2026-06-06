@@ -81,6 +81,7 @@ def fetch_omo_config(
             else ", ".join(providers[:-1]) + " and " + providers[-1]
         )
         print(f"{DIM}Fetching OMO config for {providers_str}...{RESET}")
+        print()
 
     try:
         try:

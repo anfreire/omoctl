@@ -1,6 +1,9 @@
 from __future__ import annotations
+
 import argparse
 import sys
+import typing
+
 from omoctl import __version__
 from omoctl.config import load_config
 from omoctl.models import ModelCache, enrich_cache_with_omo, load_models
@@ -135,7 +138,7 @@ def cmd_update(args: argparse.Namespace) -> None:
         omo_config = fetch_omo_config(tuple(profile.providers))
         enriched_cache = enrich_cache_with_omo(cache, omo_config)
 
-        curr_config = get_profile_config(profile.alias)
+        curr_config = typing.cast(dict, get_profile_config(profile.alias))
 
         patched_config, keys = apply_patches_to_config(
             enriched_cache,

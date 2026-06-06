@@ -48,35 +48,40 @@ def _format_fallback_entry(fb: dict) -> str:
     return model
 
 
+def _fb_key(fb: dict) -> tuple:
+    return tuple(sorted(fb.items()))
+
+
 def _print_fallbacks_dim(fallbacks: list[dict]) -> None:
     if not fallbacks:
         return
     print(f"    {DIM}fallback_models:{RESET}")
-    for i, fb in enumerate(fallbacks, 1):
-        print(f"      {DIM}{i}. {_format_fallback_entry(fb)}{RESET}")
+    for fb in fallbacks:
+        print(f"        {DIM}{_format_fallback_entry(fb)}{RESET}")
 
 
 def _print_fallbacks_diff(
     old_fallbacks: list[dict],
     new_fallbacks: list[dict],
 ) -> None:
+    old_keys = {_fb_key(fb) for fb in old_fallbacks}
+    new_keys = {_fb_key(fb) for fb in new_fallbacks}
+
+    removed = [fb for fb in old_fallbacks if _fb_key(fb) not in new_keys]
+    added = [fb for fb in new_fallbacks if _fb_key(fb) not in old_keys]
+    kept = [fb for fb in new_fallbacks if _fb_key(fb) in old_keys]
+
+    if not removed and not added:
+        _print_fallbacks_dim(new_fallbacks)
+        return
+
     print(f"    {BOLD}fallback_models:{RESET}")
-    max_len = max(len(old_fallbacks), len(new_fallbacks))
-    for i in range(max_len):
-        old_fb = old_fallbacks[i] if i < len(old_fallbacks) else None
-        new_fb = new_fallbacks[i] if i < len(new_fallbacks) else None
-        if old_fb is not None and new_fb is not None:
-            if old_fb == new_fb:
-                print(f"      {DIM}{i + 1}. {_format_fallback_entry(old_fb)}{RESET}")
-            else:
-                print(f"      {RED}- {i + 1}. {_format_fallback_entry(old_fb)}{RESET}")
-                print(
-                    f"      {GREEN}+ {i + 1}. {_format_fallback_entry(new_fb)}{RESET}"
-                )
-        elif old_fb is not None:
-            print(f"      {RED}- {i + 1}. {_format_fallback_entry(old_fb)}{RESET}")
-        else:
-            print(f"      {GREEN}+ {i + 1}. {_format_fallback_entry(new_fb)}{RESET}")
+    for fb in removed:
+        print(f"      {RED}- {_format_fallback_entry(fb)}{RESET}")
+    for fb in added:
+        print(f"      {GREEN}+ {_format_fallback_entry(fb)}{RESET}")
+    for fb in kept:
+        print(f"        {DIM}{_format_fallback_entry(fb)}{RESET}")
 
 
 def print_diff(
@@ -92,14 +97,22 @@ def print_diff(
         patched_entry = patched_config[section][name]
         label = parse_section_label(section)
 
-        print()
-
         if curr_entry is None:
             print(f"{GREEN}+  {BOLD}{label} {name!r}{RESET}")
             print(f"{GREEN}+    model: {patched_entry.get('model', '?')}{RESET}")
+            new_fb = patched_entry.get("fallback_models") or []
+            if new_fb:
+                print(f"{GREEN}+    fallback_models:{RESET}")
+                for fb in new_fb:
+                    print(f"{GREEN}+      {_format_fallback_entry(fb)}{RESET}")
+            for key, val in patched_entry.items():
+                if key in ("model", "fallback_models"):
+                    continue
+                print(f"{GREEN}+    {key}: {val}{RESET}")
+            print()
             continue
 
-        changes: list[tuple[str, str | None, str]] = []
+        changes: list[tuple[str, object, object]] = []
         for key, new_val in patched_entry.items():
             old_val = curr_entry.get(key)
             if old_val is None:
@@ -110,20 +123,38 @@ def print_diff(
         if not changes:
             print(f"  {BOLD}{DIM}{label} {name!r}{RESET}")
             print(f"    {DIM}model: {patched_entry.get('model', '?')}{RESET}")
-            _print_fallbacks_dim(patched_entry.get("fallback_models", []))
+            _print_fallbacks_dim(patched_entry.get("fallback_models") or [])
+            print()
             continue
 
         print(f"  {BOLD}{label} {name!r}{RESET}")
+        changed_keys = {key for key, _, _ in changes}
+
+        old_model = curr_entry.get("model")
+        new_model = patched_entry.get("model", "?")
+        if "model" in changed_keys:
+            if old_model is not None:
+                print(f"    {RED}- model: {old_model}{RESET}")
+            print(f"    {GREEN}+ model: {new_model}{RESET}")
+        else:
+            print(f"    {DIM}model: {new_model}{RESET}")
+
+        old_fb = curr_entry.get("fallback_models") or []
+        new_fb = patched_entry.get("fallback_models") or []
+        if "fallback_models" in changed_keys:
+            _print_fallbacks_diff(old_fb, new_fb)
+        elif new_fb:
+            _print_fallbacks_dim(new_fb)
+
         for key, old_val, new_val in changes:
-            if key == "fallback_models" and isinstance(new_val, list):
-                old_list = old_val if isinstance(old_val, list) else []
-                _print_fallbacks_diff(old_list, new_val)
+            if key in ("model", "fallback_models"):
                 continue
             if old_val is None:
                 print(f"    {GREEN}+ {key}: {new_val}{RESET}")
             else:
                 print(f"    {RED}- {key}: {old_val}{RESET}")
                 print(f"    {GREEN}+ {key}: {new_val}{RESET}")
+        print()
 
 
 def print_profile_list(
