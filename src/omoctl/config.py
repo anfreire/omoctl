@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import sys
 import typing
 
 import dacite
 import yaml
 
-from omoctl.output import die
+from omoctl.output import BOLD, GREEN, RESET, die
 from omoctl.paths import CONFIG_DIR, CONFIG_PATH, PROFILES_DIR
-from omoctl.types import _UNSET
+from omoctl.types import _UNSET, parse_model_spec
 
 
 @dataclasses.dataclass
@@ -175,15 +176,48 @@ profiles:
 """
 
 
+def _check_model_specs(config: Config) -> None:
+    """Die with context if any patch/remove_fallbacks model spec is malformed.
+
+    Running this at load time means every command fails fast with a clear
+    message instead of crashing mid-update.
+    """
+    specs: list[tuple[str, typing.Any]] = []
+
+    def collect(
+        owner: str,
+        patches: list[Patch] | None,
+        remove_fallbacks: list[PatchSource] | None,
+    ) -> None:
+        for i, patch in enumerate(patches or []):
+            specs.append((f"{owner}patch [{i}] source", patch.source.model))
+            specs.append((f"{owner}patch [{i}] target", patch.target.model))
+        for i, source in enumerate(remove_fallbacks or []):
+            specs.append((f"{owner}remove_fallbacks [{i}]", source.model))
+
+    collect("global ", config.patches, config.remove_fallbacks)
+    for profile in config.profiles:
+        collect(f"profile {profile.name!r} ", profile.patches, profile.remove_fallbacks)
+
+    for ctx, raw in specs:
+        try:
+            parse_model_spec(raw)
+        except ValueError as e:
+            die(f"Config at {CONFIG_PATH}:\n  {ctx}: {e}")
+
+
 def load_config() -> Config:
     if not CONFIG_PATH.exists():
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         PROFILES_DIR.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.write_text(_DEFAULT_YAML)
-        die(
-            f"No config found. A default has been created at {CONFIG_PATH}\n"
-            f"  Edit it to define your profiles and re-run."
+        print(
+            f"{GREEN}No config found — created a default at "
+            f"{BOLD}{CONFIG_PATH}{RESET}\n"
+            f"  Edit it to define your profiles, then re-run.",
+            file=sys.stderr,
         )
+        sys.exit(1)
 
     try:
         with CONFIG_PATH.open() as f:
@@ -212,5 +246,7 @@ def load_config() -> Config:
                 f"  Rename one of them so they produce distinct aliases."
             )
         seen_aliases[profile.alias] = profile.name
+
+    _check_model_specs(config)
 
     return config

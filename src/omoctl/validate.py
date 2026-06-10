@@ -4,7 +4,7 @@ from omoctl.config import Config, Patch, PatchSource
 from omoctl.models import ModelCache
 from omoctl.omo import get_available_providers
 from omoctl.output import BOLD, GREEN, RED, RESET
-from omoctl.types import _UNSET
+from omoctl.types import ModelFilter, ModelProps, _UNSET, parse_model_spec
 
 
 def validate_config(config: Config, cache: ModelCache) -> list[str]:
@@ -14,6 +14,12 @@ def validate_config(config: Config, cache: ModelCache) -> list[str]:
     model_providers = set(cache.provider_to_models.keys())
     known_agents = set(cache.agent_names)
     known_categories = set(cache.category_names)
+
+    if config.active_profile and config.get_active_profile() is None:
+        errors.append(
+            f"active_profile {config.active_profile!r} does not match any profile. "
+            f"Defined: {', '.join(p.name for p in config.profiles)}"
+        )
 
     if config.patches:
         for i, patch in enumerate(config.patches):
@@ -80,6 +86,56 @@ def validate_config(config: Config, cache: ModelCache) -> list[str]:
     return errors
 
 
+def _model_spec_matches_any(
+    spec: ModelFilter | str,
+    provider: str | None,
+    cache: ModelCache,
+) -> bool:
+    """True if the spec matches at least one available model.
+
+    Scoped to one provider's models when given, otherwise all providers.
+    """
+    if provider is not None:
+        pools = [cache.provider_to_models.get(provider, ())]
+    else:
+        pools = list(cache.provider_to_models.values())
+    for models in pools:
+        for model_id in models:
+            if isinstance(spec, str):
+                if spec == model_id:
+                    return True
+            elif spec.matches(ModelProps.from_model_id(model_id)):
+                return True
+    return False
+
+
+def _validate_model_spec(
+    raw: object,
+    provider: str | None,
+    what: str,
+    ctx: str,
+    cache: ModelCache,
+    errors: list[str],
+) -> None:
+    """Validate one source/target model spec: parseable, and matching at
+    least one available model (within its provider when one is given)."""
+    try:
+        spec = parse_model_spec(raw)
+    except ValueError as e:
+        errors.append(f"{ctx}: {what} model: {e}")
+        return
+
+    if spec is None or not cache.provider_to_models:
+        return
+
+    if not _model_spec_matches_any(spec, provider, cache):
+        scope = f"provider {provider!r}" if provider else "any provider"
+        if isinstance(spec, str):
+            errors.append(f"{ctx}: {what} model {spec!r} not found in {scope}.")
+        else:
+            errors.append(f"{ctx}: {what} model filter matches no models in {scope}.")
+
+
 def _validate_patch(
     patch: Patch,
     ctx: str,
@@ -107,12 +163,8 @@ def _validate_patch(
             f"Available: {', '.join(sorted(known_categories))}"
         )
 
-    if src.provider and isinstance(src.model, str):
-        models = cache.provider_to_models.get(src.provider, ())
-        if src.model not in models:
-            errors.append(
-                f"{ctx}: source model {src.model!r} not in provider {src.provider!r}."
-            )
+    if src.model is not None:
+        _validate_model_spec(src.model, src.provider, "source", ctx, cache, errors)
 
     if not src.provider and not src.agent and not src.category:
         errors.append(
@@ -127,12 +179,8 @@ def _validate_patch(
     if tgt.provider and tgt.provider not in model_providers:
         errors.append(f"{ctx}: target provider {tgt.provider!r} not found.")
 
-    if tgt.provider and isinstance(tgt.model, str):
-        models = cache.provider_to_models.get(tgt.provider, ())
-        if tgt.model not in models:
-            errors.append(
-                f"{ctx}: target model {tgt.model!r} not in provider {tgt.provider!r}."
-            )
+    if tgt.model is not None:
+        _validate_model_spec(tgt.model, tgt.provider, "target", ctx, cache, errors)
 
 
 def _validate_remove_fallback(
@@ -164,12 +212,10 @@ def _validate_remove_fallback(
             f"Available: {', '.join(sorted(known_categories))}"
         )
 
-    if source.provider and isinstance(source.model, str):
-        models = cache.provider_to_models.get(source.provider, ())
-        if source.model not in models:
-            errors.append(
-                f"{ctx}: source model {source.model!r} not in provider {source.provider!r}."
-            )
+    if source.model is not None:
+        _validate_model_spec(
+            source.model, source.provider, "source", ctx, cache, errors
+        )
 
 
 def print_validation_result(errors: list[str]) -> bool:
