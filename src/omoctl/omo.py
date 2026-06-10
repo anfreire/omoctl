@@ -7,7 +7,12 @@ import shutil
 import subprocess
 
 from omoctl.output import DIM, RESET, die
-from omoctl.paths import ACTIVE_CONFIG_PATH, BUNX_HOME_FALLBACK, UPDATED_CONFIG_PATH
+from omoctl.paths import (
+    ACTIVE_BACKUP_PATH,
+    ACTIVE_CONFIG_PATH,
+    BUNX_HOME_FALLBACK,
+    UPDATED_CONFIG_PATH,
+)
 
 _SKIP_FLAGS = {"no-tui", "skip-auth", "help", "h"}
 
@@ -57,6 +62,16 @@ def get_available_providers() -> tuple[str, ...]:
     return tuple(providers)
 
 
+def _recover_active_backup() -> None:
+    """Restore the active config from a backup a hard-killed run left behind."""
+    if not ACTIVE_BACKUP_PATH.exists():
+        return
+    if not ACTIVE_CONFIG_PATH.exists():
+        ACTIVE_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ACTIVE_CONFIG_PATH.write_text(ACTIVE_BACKUP_PATH.read_text())
+    ACTIVE_BACKUP_PATH.unlink()
+
+
 @functools.cache
 def fetch_omo_config(
     providers: tuple[str, ...],
@@ -65,10 +80,15 @@ def fetch_omo_config(
     runner = _find_runner()
 
     UPDATED_CONFIG_PATH.unlink(missing_ok=True)
+    _recover_active_backup()
 
+    # The active config must be out of the way while oh-my-opencode runs.
+    # Keep an on-disk copy so even a hard kill can't lose it.
     active_backup: str | None = None
     if ACTIVE_CONFIG_PATH.exists():
         active_backup = ACTIVE_CONFIG_PATH.read_text()
+        ACTIVE_BACKUP_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ACTIVE_BACKUP_PATH.write_text(active_backup)
         ACTIVE_CONFIG_PATH.unlink()
 
     all_flags = get_available_providers()
@@ -90,6 +110,7 @@ def fetch_omo_config(
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=300,
             )
         except subprocess.CalledProcessError as e:
             die(
@@ -109,3 +130,4 @@ def fetch_omo_config(
         UPDATED_CONFIG_PATH.unlink(missing_ok=True)
         if active_backup is not None:
             ACTIVE_CONFIG_PATH.write_text(active_backup)
+            ACTIVE_BACKUP_PATH.unlink(missing_ok=True)
