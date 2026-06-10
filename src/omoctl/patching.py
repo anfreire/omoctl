@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from omoctl.config import Config, Patch, PatchSource, Profile, merge_dicts
 from omoctl.models import ModelCache, find_best_matching_model
 from omoctl.output import die
-from omoctl.types import ModelProps, _UNSET, parse_model_spec
+from omoctl.types import ModelFilter, ModelProps, _UNSET, parse_model_spec
+
+
+def _split_provider_model(model: str) -> tuple[str | None, str]:
+    if "/" in model:
+        provider, model_id = model.split("/", 1)
+        return provider, model_id
+    return None, model
 
 
 def _match_agent_or_category(patch: Patch, section: str, name: str) -> bool:
@@ -15,51 +24,49 @@ def _match_agent_or_category(patch: Patch, section: str, name: str) -> bool:
     return False
 
 
-def _match_provider_model(
-    patch: Patch, provider: str, model_id: str
-) -> tuple[bool, tuple]:
-    src = patch.source
-    if src.provider is None:
-        return False, ()
-    if src.provider != provider:
-        return False, ()
+def _score_model_match(spec: ModelFilter | str | None, model_id: str) -> tuple | None:
+    """Score how well a parsed model spec matches a model id.
 
-    model_spec = parse_model_spec(src.model)
-
-    if isinstance(model_spec, str):
-        if model_spec == model_id:
-            return True, (3,)
-        return False, ()
-
-    if model_spec is None:
-        return True, (0, 0, 0, ())
-
-    model_props = ModelProps.from_model_id(model_id)
-    if model_props is None:
-        return False, ()
-
-    if any(w in model_props.words for w in model_spec.words_exclude):
-        return False, ()
-    if any(n in model_props.numbers for n in model_spec.numbers_exclude):
-        return False, ()
-    if not all(w in model_props.words for w in model_spec.words_include):
-        return False, ()
-    if not all(n in model_props.numbers for n in model_spec.numbers_include):
-        return False, ()
-
-    specificity = (
-        len(model_spec.words_include)
-        + len(model_spec.words_exclude)
-        + len(model_spec.numbers_include)
-        + len(model_spec.numbers_exclude)
-    )
+    Returns None on no match. Scores order as: exact string > filter
+    (by specificity, then presence of numbers, then version) > no constraint.
+    """
+    if isinstance(spec, str):
+        return (3,) if spec == model_id else None
+    if spec is None:
+        return (0, 0, 0, ())
+    props = ModelProps.from_model_id(model_id)
+    if not spec.matches(props):
+        return None
     version_key = (
-        tuple(int(n) for n in model_spec.numbers_include)
-        if model_spec.numbers_include
-        else ()
+        tuple(int(n) for n in spec.numbers_include) if spec.numbers_include else ()
     )
+    return (1, spec.specificity, 1 if spec.numbers_include else 0, version_key)
 
-    return True, (1, specificity, 1 if model_spec.numbers_include else 0, version_key)
+
+def _score_scoped_patch(
+    patch: Patch, provider: str | None, model_id: str
+) -> tuple | None:
+    """Score an agent/category-scoped patch against the current model.
+
+    The source's provider and model constraints must both hold; among
+    matches, exact models beat filters beat no constraint, and a provider
+    constraint breaks remaining ties.
+    """
+    src = patch.source
+    if src.provider:
+        if provider is None or src.provider != provider:
+            return None
+    model_score = _score_model_match(parse_model_spec(src.model), model_id)
+    if model_score is None:
+        return None
+    return (model_score, 1 if src.provider else 0)
+
+
+def _match_provider_model(patch: Patch, provider: str, model_id: str) -> tuple | None:
+    src = patch.source
+    if src.provider is None or src.provider != provider:
+        return None
+    return _score_model_match(parse_model_spec(src.model), model_id)
 
 
 def _resolve_target(
@@ -92,38 +99,32 @@ def patch_model(
     model: str,
     patches: list[Patch],
 ) -> tuple[str, object]:
-    # 1. Agent/category-specific patches (highest priority)
+    provider, model_id = _split_provider_model(model)
+
+    # 1. Agent/category-scoped patches (highest priority), scored so that
+    #    more specific sources win; list order (profile first) breaks ties.
+    best: tuple[tuple, Patch] | None = None
     for patch in patches:
         if not _match_agent_or_category(patch, section, name):
             continue
-        src = patch.source
-        if src.provider and "/" in model:
-            provider, model_id = model.split("/", 1)
-            if src.provider != provider:
-                continue
-            if src.model:
-                matched, _ = _match_provider_model(patch, provider, model_id)
-                if not matched:
-                    continue
-        return _resolve_target(
-            cache,
-            patch,
-            model.split("/", 1)[0] if "/" in model else None,
-            model.split("/", 1)[1] if "/" in model else model,
-        )
+        score = _score_scoped_patch(patch, provider, model_id)
+        if score is None:
+            continue
+        if best is None or score > best[0]:
+            best = (score, patch)
+    if best is not None:
+        return _resolve_target(cache, best[1], provider, model_id)
 
-    # 2. Provider/model patches (scored by specificity)
-    if "/" not in model or not patches:
+    # 2. Provider/model patches, scored the same way.
+    if provider is None:
         return model, _UNSET
 
-    provider, model_id = model.split("/", 1)
-
-    best: tuple[tuple, Patch] | None = None
+    best = None
     for patch in patches:
         if patch.source.agent or patch.source.category:
             continue
-        matched, score = _match_provider_model(patch, provider, model_id)
-        if not matched:
+        score = _match_provider_model(patch, provider, model_id)
+        if score is None:
             continue
         if best is None or score > best[0]:
             best = (score, patch)
@@ -138,7 +139,7 @@ def _fallback_matches_remove(
     fb: dict,
     section: str,
     name: str,
-    remove_fallbacks: list[PatchSource],
+    remove_fallbacks: Sequence[PatchSource],
 ) -> bool:
     if "model" not in fb:
         return False
@@ -170,20 +171,8 @@ def _fallback_matches_remove(
         if spec is None:
             return True
 
-        props = ModelProps.from_model_id(fb_model_id)
-        if props is None:
-            continue
-
-        if any(w in props.words for w in spec.words_exclude):
-            continue
-        if any(n in props.numbers for n in spec.numbers_exclude):
-            continue
-        if not all(w in props.words for w in spec.words_include):
-            continue
-        if not all(n in props.numbers for n in spec.numbers_include):
-            continue
-
-        return True
+        if spec.matches(ModelProps.from_model_id(fb_model_id)):
+            return True
 
     return False
 
@@ -194,7 +183,7 @@ def _patch_fallbacks(
     name: str,
     fallbacks: list[dict],
     patches: list[Patch],
-    remove_fallbacks: list[PatchSource] = (),
+    remove_fallbacks: Sequence[PatchSource] = (),
 ) -> list[dict]:
     result = []
     for fb in fallbacks:

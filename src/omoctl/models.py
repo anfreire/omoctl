@@ -60,9 +60,13 @@ def load_models(refresh: bool = False) -> dict[str, tuple[str, ...]]:
     provider_to_models: dict[str, set[str]] = {}
     for line in result.stdout.splitlines():
         line = line.strip()
-        if not line or "/" not in line:
+        # Model lines are single `<provider>/<model>` tokens; anything with
+        # whitespace or a missing half is log noise, not a model.
+        if not line or "/" not in line or any(c.isspace() for c in line):
             continue
         provider, _, model = line.partition("/")
+        if not provider or not model or model.startswith("/"):
+            continue
         provider_to_models.setdefault(provider, set()).add(model)
 
     return {p: tuple(sorted(models)) for p, models in provider_to_models.items()}
@@ -120,28 +124,27 @@ def find_best_matching_model(
         original_props and original_props.numbers
     )
 
-    def _matches(props: ModelProps) -> bool:
-        return (
-            all(w in props.words for w in include_words)
-            and not any(w in props.words for w in exclude_words)
-            and all(n in props.numbers for n in include_numbers)
-            and not any(n in props.numbers for n in exclude_numbers)
-        )
+    model_filter = ModelFilter(
+        words_include=include_words,
+        words_exclude=exclude_words,
+        numbers_include=include_numbers,
+        numbers_exclude=exclude_numbers,
+    )
 
     candidates: list[tuple[str, ModelProps]] = []
     for model_id in provider_to_models[target_provider]:
         props = ModelProps.from_model_id(model_id)
-        if props is not None and _matches(props):
+        if model_filter.matches(props):
             candidates.append((model_id, props))
 
     if not candidates and version_specified:
+        relaxed_filter = ModelFilter(
+            words_include=include_words,
+            words_exclude=exclude_words,
+        )
         for model_id in provider_to_models[target_provider]:
             props = ModelProps.from_model_id(model_id)
-            if props is None:
-                continue
-            if all(w in props.words for w in include_words) and not any(
-                w in props.words for w in exclude_words
-            ):
+            if relaxed_filter.matches(props):
                 candidates.append((model_id, props))
 
     if not candidates:
