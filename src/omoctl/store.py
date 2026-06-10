@@ -6,12 +6,12 @@ from omoctl.output import die
 from omoctl.paths import ACTIVE_CONFIG_PATH, ACTIVE_STATE_PATH, PROFILES_DIR
 
 
-def save_profile(alias: str, name: str, config: dict) -> None:
+def save_profile(alias: str, config: dict) -> None:
     PROFILES_DIR.mkdir(parents=True, exist_ok=True)
     (PROFILES_DIR / f"{alias}.json").write_text(json.dumps(config, indent=2))
 
 
-def activate_profile(alias: str, name: str, config: dict) -> None:
+def activate_profile(alias: str, config: dict) -> None:
     ACTIVE_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     ACTIVE_CONFIG_PATH.write_text(json.dumps(config, indent=2))
 

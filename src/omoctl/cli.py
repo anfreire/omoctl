@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-import typing
 
 from omoctl import __version__
 from omoctl.config import load_config
@@ -33,14 +32,17 @@ from omoctl.validate import print_validation_result, validate_config
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    if args.alias:
+    # The state file (written on every activation) is the single source of
+    # truth for what is active; the config's `active_profile` pin only
+    # drives auto-activation after `update`.
+    if getattr(args, "alias", False):
         active_alias = get_active_alias()
         if not active_alias:
             die("No active profile. Run 'omoctl use <profile>' first.")
         print(active_alias)
         return
 
-    if args.name:
+    if getattr(args, "name", False):
         active_alias = get_active_alias()
         if not active_alias:
             die("No active profile. Run 'omoctl use <profile>' first.")
@@ -51,7 +53,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(profile.name)
         return
 
-    if args.json:
+    if getattr(args, "json", False):
         if not ACTIVE_CONFIG_PATH.exists():
             die(
                 f"No active config at {ACTIVE_CONFIG_PATH}.\n"
@@ -63,15 +65,24 @@ def cmd_status(args: argparse.Namespace) -> None:
     config = load_config()
     active_alias = get_active_alias()
 
-    profile = None
-    if config.active_profile:
-        profile = config.find_profile(config.active_profile)
-    if profile is None and active_alias:
-        profile = config.find_profile(active_alias)
-
-    if profile is None:
+    if not active_alias:
         print(f"{DIM}No active profile.{RESET}")
-        print(f"{DIM}Run 'omoctl list' to see available profiles.{RESET}")
+        print(
+            f"{DIM}Run 'omoctl update' to build profiles, "
+            f"then 'omoctl use <profile>' to activate one.{RESET}"
+        )
+        return
+
+    profile = config.find_profile(active_alias)
+    if profile is None:
+        print(
+            f"{BOLD}Active profile:{RESET} {GREEN}{active_alias}{RESET} "
+            f"{DIM}(not defined in config.yaml){RESET}"
+        )
+        print(
+            f"{DIM}The active config still applies, but 'omoctl update' "
+            f"will not rebuild it.{RESET}"
+        )
         return
 
     print_profile_status(profile.name, profile.alias, profile.providers)
@@ -79,8 +90,7 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 def cmd_list(_args: argparse.Namespace) -> None:
     config = load_config()
-    active_profile = config.get_active_profile()
-    active_alias = active_profile.alias if active_profile else get_active_alias()
+    active_alias = get_active_alias()
 
     profiles = [(p.name, p.alias, p.providers) for p in config.profiles]
 
@@ -107,12 +117,13 @@ def cmd_use(args: argparse.Namespace) -> None:
             f"  Run 'omoctl update {profile.alias}' first to fetch and build it."
         )
 
-    activate_profile(profile.alias, profile.name, stored_config)
+    activate_profile(profile.alias, stored_config)
     print(f"{GREEN}Switched to profile: {BOLD}{profile.name}{RESET}")
 
 
 def cmd_update(args: argparse.Namespace) -> None:
     config = load_config()
+    state_alias = get_active_alias()
 
     if args.profile:
         profile = config.find_profile(args.profile)
@@ -126,9 +137,6 @@ def cmd_update(args: argparse.Namespace) -> None:
     provider_to_models = load_models(refresh=True)
     cache = ModelCache(provider_to_models=provider_to_models)
 
-    active_profile = config.get_active_profile()
-    active_alias = active_profile.alias if active_profile else get_active_alias()
-
     for idx, profile in enumerate(profiles):
         if idx:
             print()
@@ -138,7 +146,7 @@ def cmd_update(args: argparse.Namespace) -> None:
         omo_config = fetch_omo_config(tuple(profile.providers))
         enriched_cache = enrich_cache_with_omo(cache, omo_config)
 
-        curr_config = typing.cast(dict, get_profile_config(profile.alias))
+        curr_config = get_profile_config(profile.alias)
 
         patched_config, keys = apply_patches_to_config(
             enriched_cache,
@@ -147,17 +155,24 @@ def cmd_update(args: argparse.Namespace) -> None:
             config,
         )
 
-        save_profile(profile.alias, profile.name, patched_config)
+        save_profile(profile.alias, patched_config)
 
         print_diff(curr_config, patched_config, keys)
 
+    # Auto-activate the pinned profile if set, else restore the previously
+    # active one.
     to_activate = config.get_active_profile()
-    if not to_activate and active_alias:
-        to_activate = config.find_profile(active_alias)
+    if config.active_profile and to_activate is None:
+        print(
+            f"{DIM}Warning: active_profile {config.active_profile!r} does not "
+            f"match any profile; skipping auto-activation.{RESET}"
+        )
+    if to_activate is None and state_alias:
+        to_activate = config.find_profile(state_alias)
     if to_activate:
         stored = get_profile_config(to_activate.alias)
         if stored:
-            activate_profile(to_activate.alias, to_activate.name, stored)
+            activate_profile(to_activate.alias, stored)
 
     valid_aliases = {p.alias for p in config.profiles}
     cleanup_stale(valid_aliases)
@@ -198,23 +213,28 @@ def cmd_version(_args: argparse.Namespace) -> None:
 
 
 def _add_status_flags(p: argparse.ArgumentParser) -> None:
+    # SUPPRESS keeps a subparser from clobbering a flag already parsed at
+    # the top level, so `omoctl -a show` behaves like `omoctl show -a`.
     group = p.add_mutually_exclusive_group()
     group.add_argument(
         "-a",
         "--alias",
         action="store_true",
+        default=argparse.SUPPRESS,
         help="Print only the active profile alias",
     )
     group.add_argument(
         "-n",
         "--name",
         action="store_true",
+        default=argparse.SUPPRESS,
         help="Print only the active profile name",
     )
     group.add_argument(
         "-j",
         "--json",
         action="store_true",
+        default=argparse.SUPPRESS,
         help="Print only the raw JSON config",
     )
 
