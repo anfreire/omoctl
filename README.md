@@ -1,5 +1,7 @@
 # omoctl
 
+[![CI](https://github.com/anfreire/omoctl/actions/workflows/ci.yml/badge.svg)](https://github.com/anfreire/omoctl/actions/workflows/ci.yml)
+
 CLI tool for managing [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) profiles in [OpenCode](https://opencode.ai).
 
 Define profiles, patch models across providers, and switch between configurations with a single command.
@@ -98,7 +100,7 @@ profiles:
 
 | Field | Type | Description |
 |---|---|---|
-| `active_profile` | string | Profile to auto-activate after `update`. Optional |
+| `active_profile` | string | Profile to auto-activate after `update`. Optional. Does not affect what `show`/`list` report — they always reflect the actually active profile |
 | `overrides` | dict | OMO config overrides applied to all profiles |
 | `patches` | list | Global patches applied to all profiles (see [Patches](#patches)) |
 | `remove_fallbacks` | list | Global rules for dropping entries from `fallback_models` lists. Each entry is a source matcher (see [Removing Fallbacks](#removing-fallbacks)) |
@@ -129,7 +131,7 @@ The source specifies what to match. All fields are optional but at least one mus
 | `agent` | string | Match a specific agent (e.g. `sisyphus`, `oracle`) |
 | `category` | string | Match a specific category (e.g. `deep`, `quick`) |
 
-These combine: `{ agent: sisyphus, provider: google }` matches sisyphus only when it uses a google model.
+These combine: `{ agent: sisyphus, provider: google }` matches sisyphus only when it uses a google model, and `{ agent: sisyphus, model: [opus] }` matches sisyphus only when its model passes the filter.
 
 ### Target
 
@@ -162,10 +164,10 @@ patches:
 
 ### Priority
 
-1. Profile patches are checked before global patches
-2. Agent/category patches take priority over provider-only patches
-3. Exact model matches beat filter matches
-4. More specific filters beat less specific ones
+1. Agent/category patches take priority over provider/model patches
+2. Within each kind, the best-scoring source wins: an exact model match beats a filter, a filter beats no model constraint, and more specific filters beat less specific ones
+3. For agent/category patches with equal model scores, having a `provider` constraint wins
+4. On a complete tie, the earlier patch wins — profile patches are checked before global patches
 
 ## Removing Fallbacks
 
@@ -223,14 +225,17 @@ model:
   exclude: [flash]
 ```
 
-Model IDs are split into words and numbers (e.g. `claude-opus-4-7` -> words: `[claude, opus]`, numbers: `[4, 7]`). Filters match against these parts.
+Model IDs are split into words and numbers (e.g. `claude-opus-4-7` -> words: `[claude, opus]`, numbers: `[4, 7]`). Filters match against these parts. A single term may be given without list brackets (`include: opus`).
+
+Malformed filters are rejected up front: unknown keys (e.g. `includes:`), wrong value types, and empty filters fail at config load with the offending patch named — they never silently match everything.
 
 ## File Layout
 
 ```
 ~/.config/omoctl/
   config.yaml              # your config
-  active                   # current active profile alias
+  active                   # active profile alias — the source of truth for `show`/`list`
+  active-config.bak        # transient crash-safety backup, only present during `update`
   profiles/
     claude.json            # stored OMO config per profile
     no-copilot.json
@@ -241,12 +246,15 @@ Model IDs are split into words and numbers (e.g. `claude-opus-4-7` -> words: `[c
 
 ## Validation
 
-`omoctl check` checks your config against live data:
+Structural problems — invalid YAML, unknown fields, wrong types, malformed model filters — are caught when the config is loaded, so every command fails fast with a pointed error.
 
+`omoctl check` additionally checks your config against live data:
+
+- Profile **providers** are valid OMO providers
 - Patch source/target **providers** exist in the model cache
-- Patch source/target **models** exist in their provider
-- Patch **agent** names exist in the OMO config
-- Patch **category** names exist in the OMO config
+- Patch source/target **models** exist in their provider (exact strings), and **filters** match at least one available model
+- Patch **agent** and **category** names exist in the OMO config
+- `active_profile` names a defined profile
 
 On failure, it prints each error with available options:
 
@@ -256,3 +264,15 @@ Validation failed with 2 error(s):
   • global patch [0]: source provider 'nonexistent' not found.
   • profile 'Test' patch [0]: source agent 'fake' not found. Available: atlas, explore, ...
 ```
+
+## Development
+
+```bash
+uv sync --group dev      # install with dev dependencies
+uv run pytest            # run the test suite
+uv run ruff check src/ tests/
+uv run ruff format --check src/ tests/
+uv run mypy src/omoctl
+```
+
+CI runs all of the above on Python 3.11, 3.12, and 3.13.

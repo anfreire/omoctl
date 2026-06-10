@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "omoctl"
-version = "0.3.1"
+version = "0.4.0"
 description = "CLI tool for managing oh-my-openagent (OMO) profiles"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -34,6 +34,20 @@ dependencies = [
 
 [project.scripts]
 omoctl = "omoctl.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "mypy>=1.10",
+    "ruff>=0.4",
+    "types-PyYAML>=6.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
 
 [project.urls]
 Homepage = "https://github.com/anfreire/omoctl"

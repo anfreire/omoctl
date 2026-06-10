@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-10
+
+### Added
+
+- Test suite (122 tests) covering the matcher, diff rendering, status display, config loading, validation, and the OMO fetch flow; GitHub Actions CI runs ruff, mypy, and pytest on Python 3.11–3.13.
+- Malformed model specs (unknown filter keys like `includes:`, wrong value types, empty filters) are rejected at config load with the offending profile/patch named, so every command fails fast instead of `update` crashing mid-run with a traceback.
+- `check` now also reports: filters that match no available model (catches typo'd terms that previously matched everything or nothing silently), malformed model specs, target models that exist in no provider, and an `active_profile` that names no defined profile.
+- Crash-safe fetching: the active OpenCode config is backed up to disk (`~/.config/omoctl/active-config.bak`) while `oh-my-opencode` runs, and automatically recovered on the next run if a previous run was hard-killed. Previously the only backup lived in memory.
+- `update` warns when the `active_profile` pin matches no profile instead of silently skipping auto-activation.
+- Model filter terms accept a single scalar without list brackets (`include: opus`).
+
+### Changed
+
+- **BREAKING**: `show` and `list` now always report the actually active profile (the state file written on activation). Previously the `active_profile` pin shadowed reality: with `active_profile: Claude` pinned and `omoctl use default` run, bare `omoctl` claimed Claude was active while `-a`/`-n`/`-j` and OpenCode itself used Default. The pin keeps its documented role: auto-activation after `update`.
+- **BREAKING**: agent/category-scoped patches now honor their `model` filter when `provider` is omitted. `{ agent: sisyphus, model: claude-opus-4-7 }` previously applied to sisyphus on *any* model; it now applies only when the model matches, as documented.
+- **BREAKING**: patch selection is scored consistently for both patch kinds: exact model beats filter beats no constraint, more specific filters beat less specific ones, a `provider` constraint breaks ties for agent/category patches, and list order (profile before global) breaks complete ties. Agent/category patches previously used pure first-match-wins.
+- Update diffs now show keys that were *removed* from an entry (e.g. a variant dropped via `variant: null`) as red `-` lines; previously removals were invisible and the entry rendered as "no changes".
+- Update diffs no longer report explicitly-null values as `+ key: None` additions on every run; values are rendered in JSON style (`null`/`true`/`false`).
+- A stale active alias (state file pointing at a profile no longer in config.yaml) is reported honestly by `show` instead of "No active profile".
+- `omoctl -a show` (status flag before the subcommand) now works instead of silently ignoring the flag.
+- The first-run message ("created a default config") is informational rather than an error-styled message.
+- Internal: `store.save_profile`/`activate_profile` dropped their unused `name` parameter; `print_diff` accepts `None` for a first build.
+
+### Fixed
+
+- The `oh-my-opencode install` subprocess now has a timeout (300s) like every other subprocess; a hung fetch no longer hangs `update` forever with the active config deleted.
+- `opencode models` output parsing ignores log/noise lines (anything with whitespace, empty halves, or a path-like model part) instead of polluting the provider list.
+
 ## [0.3.1] - 2026-06-06
 
 ### Changed
