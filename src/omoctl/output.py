@@ -55,31 +55,23 @@ def _fmt(val: object) -> str:
         return str(val)
 
 
-def _format_model_variant(entry: dict) -> str:
-    """Render an entry's model with its variant inline: `model (variant: x)`.
+def _format_model_variant(model: object, variant: object) -> str:
+    """One display unit for a model and its variant: `model (variant: x)`.
 
-    Used for both the main model line and fallback entries so the two
-    always present variants the same way.
+    Used for the main model line and fallback entries alike, so variants
+    render identically everywhere.
     """
-    model = entry.get("model", "?")
-    variant = entry.get("variant")
     if variant is not None:
         return f"{_fmt(model)} (variant: {_fmt(variant)})"
     return _fmt(model)
 
 
-def _model_variant_segments(
-    entry: dict, model_changed: bool, variant_changed: bool, accent: str
-) -> str:
-    """Like _format_model_variant, but each segment is accent-colored only
-    if it actually changed; the unchanged segment renders dim."""
-    model_color = accent if model_changed else DIM
-    text = f"{model_color}{_fmt(entry.get('model', '?'))}{RESET}"
-    variant = entry.get("variant")
-    if variant is not None:
-        variant_color = accent if variant_changed else DIM
-        text += f" {variant_color}(variant: {_fmt(variant)}){RESET}"
-    return text
+def _format_entry_model(entry: dict) -> str:
+    return _format_model_variant(entry.get("model", "?"), entry.get("variant"))
+
+
+def _format_fallback_entry(fb: dict) -> str:
+    return _format_model_variant(fb.get("model", "?"), fb.get("variant"))
 
 
 def _fb_key(fb: dict) -> str:
@@ -94,7 +86,7 @@ def _print_fallbacks_dim(fallbacks: list[dict]) -> None:
         return
     print(f"    {DIM}fallback_models:{RESET}")
     for fb in fallbacks:
-        print(f"        {DIM}{_format_model_variant(fb)}{RESET}")
+        print(f"        {DIM}{_format_fallback_entry(fb)}{RESET}")
 
 
 def _print_fallbacks_diff(
@@ -114,21 +106,21 @@ def _print_fallbacks_diff(
 
     print(f"    {BOLD}fallback_models:{RESET}")
     for fb in removed:
-        print(f"      {RED}- {_format_model_variant(fb)}{RESET}")
+        print(f"      {RED}- {_format_fallback_entry(fb)}{RESET}")
     for fb in added:
-        print(f"      {GREEN}+ {_format_model_variant(fb)}{RESET}")
+        print(f"      {GREEN}+ {_format_fallback_entry(fb)}{RESET}")
     for fb in kept:
-        print(f"        {DIM}{_format_model_variant(fb)}{RESET}")
+        print(f"        {DIM}{_format_fallback_entry(fb)}{RESET}")
 
 
 def _print_new_entry(label: str, name: str, patched_entry: dict) -> None:
     print(f"{GREEN}+  {BOLD}{label} {name!r}{RESET}")
-    print(f"{GREEN}+    model: {_format_model_variant(patched_entry)}{RESET}")
+    print(f"{GREEN}+    model: {_format_entry_model(patched_entry)}{RESET}")
     new_fb = patched_entry.get("fallback_models") or []
     if new_fb:
         print(f"{GREEN}+    fallback_models:{RESET}")
         for fb in new_fb:
-            print(f"{GREEN}+      {_format_model_variant(fb)}{RESET}")
+            print(f"{GREEN}+      {_format_fallback_entry(fb)}{RESET}")
     for key, val in patched_entry.items():
         if key in ("model", "variant", "fallback_models"):
             continue
@@ -161,30 +153,20 @@ def print_diff(
             _print_new_entry(label, name, patched_entry)
             continue
 
-        # The model and its variant render as one unit, exactly like
-        # fallback entries: `model (variant: x)`. Comparing via .get() means
-        # an explicit-null variant and an absent one never report as churn.
-        model_changed = curr_entry.get("model") != patched_entry.get("model")
-        variant_changed = curr_entry.get("variant") != patched_entry.get("variant")
-
-        # Diff the remaining keys over the union so removals are visible too.
+        # Diff over the union of keys so removals are visible too.
         changes: list[tuple[str, object, object]] = []
         for key, new_val in patched_entry.items():
-            if key in ("model", "variant"):
-                continue
             if key not in curr_entry:
                 changes.append((key, _MISSING, new_val))
             elif curr_entry[key] != new_val:
                 changes.append((key, curr_entry[key], new_val))
         for key, old_val in curr_entry.items():
-            if key in ("model", "variant"):
-                continue
             if key not in patched_entry:
                 changes.append((key, old_val, _MISSING))
 
-        if not model_changed and not variant_changed and not changes:
+        if not changes:
             print(f"  {BOLD}{DIM}{label} {name!r}{RESET}")
-            print(f"    {DIM}model: {_format_model_variant(patched_entry)}{RESET}")
+            print(f"    {DIM}model: {_format_entry_model(patched_entry)}{RESET}")
             _print_fallbacks_dim(patched_entry.get("fallback_models") or [])
             print()
             continue
@@ -192,27 +174,14 @@ def print_diff(
         print(f"  {BOLD}{label} {name!r}{RESET}")
         changed_keys = {key for key, _, _ in changes}
 
-        # Within the -/+ model lines only the segment that changed gets the
-        # accent color; the other is dim.
-        if model_changed or variant_changed:
-            if (
-                curr_entry.get("model") is not None
-                or curr_entry.get("variant") is not None
-            ):
-                print(
-                    f"    {RED}- model: {RESET}"
-                    + _model_variant_segments(
-                        curr_entry, model_changed, variant_changed, RED
-                    )
-                )
-            print(
-                f"    {GREEN}+ model: {RESET}"
-                + _model_variant_segments(
-                    patched_entry, model_changed, variant_changed, GREEN
-                )
-            )
+        # The model and its variant render as one unit, so a variant
+        # change diffs on the model line — same as fallback entries.
+        if "model" in changed_keys or "variant" in changed_keys:
+            if "model" in curr_entry or "variant" in curr_entry:
+                print(f"    {RED}- model: {_format_entry_model(curr_entry)}{RESET}")
+            print(f"    {GREEN}+ model: {_format_entry_model(patched_entry)}{RESET}")
         else:
-            print(f"    {DIM}model: {_format_model_variant(patched_entry)}{RESET}")
+            print(f"    {DIM}model: {_format_entry_model(patched_entry)}{RESET}")
 
         old_fb = curr_entry.get("fallback_models") or []
         new_fb = patched_entry.get("fallback_models") or []
