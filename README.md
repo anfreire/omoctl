@@ -5,7 +5,7 @@
 
 CLI tool for managing [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) profiles in [OpenCode](https://opencode.ai).
 
-Define profiles, patch models across providers, and switch between configurations with a single command.
+OMO wires your agents to one fixed set of models — and the moment providers change (a plan runs dry, a subscription ends, a model has a bad day) you're hand-editing `oh-my-openagent.jsonc` again. omoctl makes it declarative: define profiles once, patch models across providers, and switch whole configurations with a single command.
 
 ## Install
 
