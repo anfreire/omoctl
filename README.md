@@ -1,6 +1,7 @@
 # omoctl
 
 [![CI](https://github.com/anfreire/omoctl/actions/workflows/ci.yml/badge.svg)](https://github.com/anfreire/omoctl/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/omoctl)](https://pypi.org/project/omoctl/)
 
 CLI tool for managing [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) profiles in [OpenCode](https://opencode.ai).
 
@@ -276,3 +277,7 @@ uv run mypy src/omoctl
 ```
 
 CI runs all of the above on Python 3.11, 3.12, and 3.13.
+
+---
+
+**More agent tooling** — [patch-cc](https://github.com/anfreire/patch-cc): patch the Claude Code binary (live thinking, Codex models) · [summon-cc](https://github.com/anfreire/summon-cc): give your agent a crew of Claude Code workers · [cc-oc](https://github.com/anfreire/cc-oc): drive opencode from inside Claude Code · [wiki-spaces](https://github.com/anfreire/wiki-spaces): a wiki your AI agent keeps
