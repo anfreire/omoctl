@@ -1,252 +1,224 @@
+"""`~/.config/omoctl/config.yaml` — the only file you edit."""
+
 from __future__ import annotations
 
-import dataclasses
 import re
-import sys
 import typing
 
-import dacite
+import pydantic
 import yaml
 
-from omoctl.output import BOLD, GREEN, RESET, die
-from omoctl.paths import CONFIG_DIR, CONFIG_PATH, PROFILES_DIR
-from omoctl.types import _UNSET, parse_model_spec
+from omoctl.models import Filter, parse_filter
+from omoctl.paths import CONFIG_PATH, PROFILES_DIR
+from omoctl.render import console, die
+
+Json = dict[str, typing.Any]
+
+# Whatever `oh-my-openagent install` accepts. omoctl never inspects the names
+# or the values; `None` means a flag that takes no value.
+Install = dict[str, str | bool | int | float | None]
+
+_STRICT = pydantic.ConfigDict(extra="forbid")
 
 
-@dataclasses.dataclass
-class PatchSource:
+def deep_merge(base: Json, over: Json) -> Json:
+    result = dict(base)
+    for key, value in over.items():
+        current = result.get(key)
+        result[key] = (
+            deep_merge(current, value)
+            if isinstance(current, dict) and isinstance(value, dict)
+            else value
+        )
+    return result
+
+
+def _glob(pattern: str) -> str:
+    """Compile a `where` into an fnmatch pattern.
+
+    Paths carry OMO's harness block verbatim (`[opencode].agents.oracle.model`),
+    and fnmatch would read those brackets as a character class — so a path
+    pasted straight out of a diff would match nothing. Escape them to literals,
+    which leaves `*` and `?` as the only glob syntax; a pattern using neither is
+    a plain word, meant as "somewhere in the path".
+    """
+    literal = pattern.replace("[", "[[]")
+    return literal if any(c in pattern for c in "*?") else f"*{literal}*"
+
+
+class Match(pydantic.BaseModel):
+    """Which model references a patch or drop applies to."""
+
+    model_config = _STRICT
+
+    where: str | None = None
     provider: str | None = None
     model: typing.Any = None
-    agent: str | None = None
-    category: str | None = None
+
+    spec: Filter | str | None = pydantic.Field(default=None, exclude=True, init=False)
+    glob: str | None = pydantic.Field(default=None, exclude=True, init=False)
+
+    @pydantic.model_validator(mode="after")
+    def _compile(self) -> Match:
+        if self.where is None and self.provider is None and self.model is None:
+            raise ValueError("needs at least one of `where`, `provider`, or `model`")
+        self.spec = parse_filter(self.model)
+        self.glob = _glob(self.where) if self.where else None
+        return self
+
+    @property
+    def label(self) -> str:
+        pairs = {"where": self.where, "provider": self.provider, "model": self.model}
+        return " ".join(f"{k}={v}" for k, v in pairs.items() if v is not None)
 
 
-@dataclasses.dataclass
-class PatchTarget:
-    provider: str | None = None
-    model: typing.Any = None
-    variant: typing.Any = dataclasses.field(default=_UNSET)
+class Patch(pydantic.BaseModel):
+    model_config = _STRICT
+
+    match: Match
+    set: Json
+
+    @pydantic.field_validator("set")
+    @classmethod
+    def _assignable(cls, value: Json) -> Json:
+        if not value:
+            raise ValueError("must assign at least one key")
+        if "model" in value and value["model"] is None:
+            raise ValueError("`model` cannot be null; an entry without a model is not a model")
+        lists = sorted(k for k in value if k.endswith("models"))
+        if lists:
+            # Replacing a whole list is a structural edit, not a rewrite of the
+            # references inside it. `overrides` does that, and keeping it out of
+            # `set` means a patch can never invalidate another patch's target.
+            raise ValueError(
+                f"cannot assign {', '.join(lists)}; use `overrides` to replace a model list"
+            )
+        parse_filter(value.get("model"))  # fail here rather than mid-update
+        return value
 
 
-@dataclasses.dataclass
-class Patch:
-    source: PatchSource = dataclasses.field(default_factory=PatchSource)
-    target: PatchTarget = dataclasses.field(default_factory=PatchTarget)
+class Profile(pydantic.BaseModel):
+    model_config = _STRICT
 
-
-@dataclasses.dataclass
-class Profile:
-    name: str = ""
-    providers: list[str] = dataclasses.field(default_factory=list)
-    patches: list[Patch] | None = None
-    overrides: dict | None = None
-    remove_fallbacks: list[PatchSource] | None = None
+    name: str = pydantic.Field(min_length=1)
+    install: Install = pydantic.Field(default_factory=dict)
+    patches: list[Patch] = pydantic.Field(default_factory=list)
+    drop: list[Match] = pydantic.Field(default_factory=list)
+    overrides: Json = pydantic.Field(default_factory=dict)
 
     @property
     def alias(self) -> str:
         return re.sub(r"[^a-z0-9]+", "-", self.name.lower()).strip("-")[:50]
 
 
-@dataclasses.dataclass
-class Config:
-    active_profile: str | None = None
-    overrides: dict | None = None
-    patches: list[Patch] | None = None
-    remove_fallbacks: list[PatchSource] | None = None
-    profiles: list[Profile] = dataclasses.field(default_factory=list)
+class Config(pydantic.BaseModel):
+    model_config = _STRICT
 
-    def find_profile(self, name_or_alias: str) -> Profile | None:
-        key = name_or_alias.lower()
+    activate: str | None = None
+    install: Install = pydantic.Field(default_factory=dict)
+    patches: list[Patch] = pydantic.Field(default_factory=list)
+    drop: list[Match] = pydantic.Field(default_factory=list)
+    overrides: Json = pydantic.Field(default_factory=dict)
+    profiles: list[Profile] = pydantic.Field(min_length=1)
+
+    @pydantic.model_validator(mode="after")
+    def _unique_aliases(self) -> Config:
+        seen: dict[str, str] = {}
         for profile in self.profiles:
-            if profile.name.lower() == key or profile.alias == key:
-                return profile
-        return None
+            if not profile.alias:
+                raise ValueError(
+                    f"profile {profile.name!r} has no letters or digits to form an alias"
+                )
+            if profile.alias in seen:
+                raise ValueError(
+                    f"profiles {seen[profile.alias]!r} and {profile.name!r} both reduce to "
+                    f"alias {profile.alias!r}; rename one"
+                )
+            seen[profile.alias] = profile.name
+        if self.activate and self.find(self.activate) is None:
+            raise ValueError(f"`activate` names {self.activate!r}, which is not a defined profile")
+        return self
 
-    def get_active_profile(self) -> Profile | None:
-        if self.active_profile is None:
-            return None
-        return self.find_profile(self.active_profile)
+    def find(self, name_or_alias: str) -> Profile | None:
+        key = name_or_alias.lower()
+        return next((p for p in self.profiles if p.name.lower() == key or p.alias == key), None)
 
-    def get_effective_patches(self, profile: Profile) -> list[Patch]:
-        result: list[Patch] = []
-        if profile.patches:
-            result.extend(profile.patches)
-        if self.patches:
-            result.extend(self.patches)
-        return result
+    # Profile settings win over global ones: install flags and overrides are
+    # merged over the global values, and profile patches are tried first.
+    def install_for(self, profile: Profile) -> Install:
+        return {**self.install, **profile.install}
 
-    def get_effective_remove_fallbacks(self, profile: Profile) -> list[PatchSource]:
-        result: list[PatchSource] = []
-        if profile.remove_fallbacks:
-            result.extend(profile.remove_fallbacks)
-        if self.remove_fallbacks:
-            result.extend(self.remove_fallbacks)
-        return result
+    def patches_for(self, profile: Profile) -> list[Patch]:
+        return [*profile.patches, *self.patches]
 
-    def get_effective_overrides(self, profile: Profile) -> dict | None:
-        if not self.overrides and not profile.overrides:
-            return None
-        result = dict(self.overrides) if self.overrides else {}
-        if profile.overrides:
-            result = merge_dicts(result, profile.overrides)
-        return result or None
+    def drops_for(self, profile: Profile) -> list[Match]:
+        return [*profile.drop, *self.drop]
 
-
-def merge_dicts(
-    base: dict[str, typing.Any], override: dict[str, typing.Any]
-) -> dict[str, typing.Any]:
-    result = base.copy()
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = merge_dicts(result[key], value)
-        else:
-            result[key] = value
-    return result
+    def overrides_for(self, profile: Profile) -> Json:
+        return deep_merge(self.overrides, profile.overrides)
 
 
-_DACITE_CONFIG = dacite.Config(check_types=True, strict=True)
+DEFAULT_YAML = """\
+# omoctl config. Run `omoctl providers` to see every flag `install:` accepts,
+# straight from oh-my-openagent itself.
 
-_DEFAULT_YAML = """\
-# omoctl default config. This is verbose on purpose so you can see every
-# option that exists. Uncomment, edit, or delete what you don't need.
-# Run `omoctl check` to validate the config against live data.
-
-# Auto-activate this profile after `omoctl update`. Optional.
-# active_profile: Claude
-
-# OMO config overrides applied to all profiles (deep-merged into the
-# final OMO config). See the oh-my-openagent schema for valid keys.
-overrides:
-  disabled_hooks:
-    - context-window-monitor
-
-# Global patches applied to all profiles. Profile patches take priority.
-# A patch rewrites a model when its source matches; see the README for
-# the full matcher syntax (provider / model / agent / category).
-# patches:
-#   - source: { provider: anthropic, model: claude-sonnet-4-6 }
-#     target: { model: claude-opus-4-6 }
-#   - { source: { provider: anthropic, model: [opus] }, target: { model: claude-opus-4-6 } }
-#   - source:
-#       provider: anthropic
-#       model:
-#         include: [claude]
-#         exclude: [haiku]
-#     target: { model: claude-sonnet-4-6 }
-#   - source: { agent: sisyphus }
-#     target: { provider: openai, model: gpt-5.4 }
-#   - source: { category: ultrabrain }
-#     target: { provider: openai, model: gpt-5.4, variant: xhigh }
-#   - source: { agent: sisyphus, model: claude-opus-4-7 }
-#     target: { variant: null }
-
-# Drop these models from any agent's or category's fallback_models lists.
-# Match is done against the ORIGINAL OMO model (not the post-patch model).
-# Each entry uses the same source fields as patches: provider, model,
-# agent, category. At least one of provider / agent / category must be set.
-# remove_fallbacks:
-#   - provider: openai
-#     model: gpt-5.5-fast
-#   - { agent: sisyphus, provider: openai }
+# Install flags every profile inherits. Profiles merge their own on top.
+install:
+  claude: no
+  gemini: no
+  copilot: no
 
 profiles:
   - name: Claude
-    providers: [claude]
-    # Per-profile overrides are deep-merged on top of global overrides.
-    # overrides:
-    #   claude_code:
-    #     agents: false
-    #     commands: false
-    #     hooks: false
-    #     mcp: false
-    #     plugins: false
-    #     skills: false
+    install: { claude: yes }
 
+  - name: Everything
+    install: { claude: yes, openai: yes, gemini: yes }
 
-  - name: Default
-    providers: [claude, openai, gemini]
-    # Per-profile patches take priority over global patches.
-    # patches:
-    #   - source: { provider: openai, model: gpt-5.4-mini-fast }
-    #     target: { model: gpt-5.4-mini }
-    # Per-profile remove_fallbacks add to the global list.
-    # remove_fallbacks:
-    #   - provider: openai
-    #     model: gpt-5.5
+# Switch to this profile after every `omoctl update`.
+# activate: Claude
+
+# Rewrite models. `match` selects references, `set` assigns keys onto them
+# (a null value deletes the key). Profile patches are tried before these.
+# patches:
+#   - match: { provider: anthropic, model: [sonnet] }
+#     set:   { model: claude-opus-5 }
+#   - match: { where: oracle }
+#     set:   { provider: opencode-go, model: glm-5.2, variant: null }
+
+# Drop entries from fallback_models / models lists. Same `match` syntax.
+# drop:
+#   - { provider: openai, model: gpt-5-nano }
+
+# Deep-merged into the final ~/.omo/omo.jsonc.
+# overrides:
+#   "[opencode]":
+#     disabled_hooks: [context-window-monitor]
 """
 
 
-def _check_model_specs(config: Config) -> None:
-    """Die with context if any patch/remove_fallbacks model spec is malformed.
-
-    Running this at load time means every command fails fast with a clear
-    message instead of crashing mid-update.
-    """
-    specs: list[tuple[str, typing.Any]] = []
-
-    def collect(
-        owner: str,
-        patches: list[Patch] | None,
-        remove_fallbacks: list[PatchSource] | None,
-    ) -> None:
-        for i, patch in enumerate(patches or []):
-            specs.append((f"{owner}patch [{i}] source", patch.source.model))
-            specs.append((f"{owner}patch [{i}] target", patch.target.model))
-        for i, source in enumerate(remove_fallbacks or []):
-            specs.append((f"{owner}remove_fallbacks [{i}]", source.model))
-
-    collect("global ", config.patches, config.remove_fallbacks)
-    for profile in config.profiles:
-        collect(f"profile {profile.name!r} ", profile.patches, profile.remove_fallbacks)
-
-    for ctx, raw in specs:
-        try:
-            parse_model_spec(raw)
-        except ValueError as e:
-            die(f"Config at {CONFIG_PATH}:\n  {ctx}: {e}")
+def _where(error: pydantic.ValidationError) -> typing.Iterator[str]:
+    for item in error.errors():
+        loc = ".".join(str(part) for part in item["loc"])
+        yield f"{loc}: {item['msg']}" if loc else item["msg"]
 
 
-def load_config() -> Config:
+def load() -> Config:
     if not CONFIG_PATH.exists():
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(_DEFAULT_YAML)
-        print(
-            f"{GREEN}No config found — created a default at "
-            f"{BOLD}{CONFIG_PATH}{RESET}\n"
-            f"  Edit it to define your profiles, then re-run.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        CONFIG_PATH.write_text(DEFAULT_YAML)
+        console.print(f"Created a starter config at [bold]{CONFIG_PATH}[/]. Edit it, then re-run.")
+        raise SystemExit(0)
 
     try:
-        with CONFIG_PATH.open() as f:
-            data = yaml.safe_load(f)
-    except yaml.YAMLError as e:
-        die(f"Config at {CONFIG_PATH} has invalid YAML:\n  {e}")
-
-    if not data or not data.get("profiles"):
-        die(f"No profiles defined in {CONFIG_PATH}. Add at least one profile.")
+        raw = yaml.safe_load(CONFIG_PATH.read_text())
+    except yaml.YAMLError as exc:
+        die(f"{CONFIG_PATH} is not valid YAML:\n  {exc}")
 
     try:
-        config = dacite.from_dict(Config, data, config=_DACITE_CONFIG)
-    except dacite.DaciteError as e:
-        die(f"Config at {CONFIG_PATH} has invalid structure:\n  {e}")
+        return Config.model_validate(raw or {})
+    except pydantic.ValidationError as exc:
+        die("\n  ".join([f"{CONFIG_PATH}:", *_where(exc)]))
 
-    seen_aliases: dict[str, str] = {}
-    for profile in config.profiles:
-        if not profile.name:
-            die("Each profile must have a 'name' field.")
-        if not profile.providers:
-            die(f"Profile {profile.name!r} must have a 'providers' field.")
-        if profile.alias in seen_aliases:
-            die(
-                f"Profile {profile.name!r} produces alias {profile.alias!r} "
-                f"which collides with profile {seen_aliases[profile.alias]!r}.\n"
-                f"  Rename one of them so they produce distinct aliases."
-            )
-        seen_aliases[profile.alias] = profile.name
 
-    _check_model_specs(config)
-
-    return config
+__all__ = ["Config", "Install", "Json", "Match", "Patch", "Profile", "deep_merge", "load"]

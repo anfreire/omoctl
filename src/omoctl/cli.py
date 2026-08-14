@@ -1,313 +1,230 @@
 from __future__ import annotations
 
-import argparse
-import sys
+import typing
 
-from omoctl import __version__
-from omoctl.config import load_config
-from omoctl.models import ModelCache, enrich_cache_with_omo, load_models
-from omoctl.omo import fetch_omo_config
-from omoctl.output import (
-    BOLD,
-    DIM,
-    GREEN,
-    RESET,
-    die,
-    print_diff,
-    print_profile_list,
-    print_profile_status,
-    print_section,
+import cyclopts
+
+from omoctl import __version__, omo, patch, store
+from omoctl.config import Config, Profile, load
+from omoctl.models import load_pool
+from omoctl.paths import omo_config
+from omoctl.render import console, die, diff, emit, esc, heading, profile_list, profile_status
+
+app = cyclopts.App(
+    name="omoctl",
+    help="Manage oh-my-openagent (OMO) profiles.",
+    version=__version__,
+    version_flags=["--version", "-v"],
 )
-from omoctl.patching import apply_patches_to_config
-from omoctl.paths import ACTIVE_CONFIG_PATH
-from omoctl.store import (
-    activate_profile,
-    cleanup_stale,
-    get_active_alias,
-    get_profile_config,
-    remove_profile,
-    save_profile,
-)
-from omoctl.validate import print_validation_result, validate_config
+
+Alias = typing.Annotated[bool, cyclopts.Parameter(name=["--alias", "-a"])]
+Name = typing.Annotated[bool, cyclopts.Parameter(name=["--name", "-n"])]
+AsJson = typing.Annotated[bool, cyclopts.Parameter(name=["--json", "-j"])]
+DryRun = typing.Annotated[bool, cyclopts.Parameter(name=["--dry-run", "-n"])]
 
 
-def cmd_status(args: argparse.Namespace) -> None:
-    # The state file (written on every activation) is the single source of
-    # truth for what is active; the config's `active_profile` pin only
-    # drives auto-activation after `update`.
-    if getattr(args, "alias", False):
-        active_alias = get_active_alias()
-        if not active_alias:
-            die("No active profile. Run 'omoctl use <profile>' first.")
-        print(active_alias)
-        return
+def _summary(config: Config, profile: Profile) -> str:
+    flags = sorted(config.install_for(profile).items())
+    return " ".join(k if v is None else f"{k}={omo.token(v)}" for k, v in flags)
 
-    if getattr(args, "name", False):
-        active_alias = get_active_alias()
-        if not active_alias:
-            die("No active profile. Run 'omoctl use <profile>' first.")
-        config = load_config()
-        profile = config.find_profile(active_alias)
-        if profile is None:
-            die(f"Active alias {active_alias!r} is not defined in config.yaml.")
-        print(profile.name)
-        return
 
-    if getattr(args, "json", False):
-        if not ACTIVE_CONFIG_PATH.exists():
-            die(
-                f"No active config at {ACTIVE_CONFIG_PATH}.\n"
-                f"  Run 'omoctl use <profile>' or 'omoctl update' first."
-            )
-        print(ACTIVE_CONFIG_PATH.read_text())
-        return
+def _stored(config: Config) -> dict[str, dict]:
+    built = {p.alias: store.load(p.alias) for p in config.profiles}
+    return {alias: cfg for alias, cfg in built.items() if cfg}
 
-    config = load_config()
-    active_alias = get_active_alias()
 
-    if not active_alias:
-        print(f"{DIM}No active profile.{RESET}")
-        print(
-            f"{DIM}Run 'omoctl update' to build profiles, "
-            f"then 'omoctl use <profile>' to activate one.{RESET}"
-        )
-        return
-
-    profile = config.find_profile(active_alias)
+def _resolve(config: Config, name: str) -> Profile:
+    profile = config.find(name)
     if profile is None:
-        print(
-            f"{BOLD}Active profile:{RESET} {GREEN}{active_alias}{RESET} "
-            f"{DIM}(not defined in config.yaml){RESET}"
-        )
-        print(
-            f"{DIM}The active config still applies, but 'omoctl update' "
-            f"will not rebuild it.{RESET}"
+        die(f"No profile named {name!r}. Run `omoctl list` to see them.")
+    return profile
+
+
+@app.default
+@app.command(name="show", alias=["current", "status"])
+def show(*, alias: Alias = False, name: Name = False, json: AsJson = False) -> None:
+    """Show the active profile.
+
+    Parameters
+    ----------
+    alias
+        Print only the active profile's alias.
+    name
+        Print only the active profile's name.
+    json
+        Print only the config OpenCode is reading.
+    """
+    if json:
+        live = omo_config()
+        if not live.exists():
+            die(f"Nothing at {live}. Run `omoctl update` first.")
+        emit(live.read_text())
+        return
+
+    current = store.active()
+    if alias:
+        if not current:
+            die("No active profile. Run `omoctl use <profile>` first.")
+        emit(current)
+        return
+
+    config = load()  # also writes the starter config on a fresh machine
+    if not current:
+        if name:
+            die("No active profile. Run `omoctl use <profile>` first.")
+        console.print(
+            "[dim]No active profile. Run `omoctl update`, then `omoctl use <profile>`.[/]"
         )
         return
 
-    print_profile_status(profile.name, profile.alias, profile.providers)
-
-
-def cmd_list(_args: argparse.Namespace) -> None:
-    config = load_config()
-    active_alias = get_active_alias()
-
-    profiles = [(p.name, p.alias, p.providers) for p in config.profiles]
-
-    if not profiles:
-        print(f"{DIM}No profiles defined in config.{RESET}")
+    profile = config.find(current)
+    if profile is None:
+        if name:
+            die(f"Active alias {current!r} is no longer defined in config.yaml.")
+        console.print(
+            f"[bold]Active profile:[/] [green]{current}[/] [dim](no longer in config.yaml)[/]"
+        )
         return
 
-    print_profile_list(profiles, active_alias)
+    if name:
+        emit(profile.name)
+        return
+    profile_status(profile.name, profile.alias, _summary(config, profile))
 
 
-def cmd_use(args: argparse.Namespace) -> None:
-    config = load_config()
-    profile = config.find_profile(args.profile)
-
-    if profile is None:
-        die(
-            f"Profile {args.profile!r} not found. Run 'omoctl list' to see available profiles."
-        )
-
-    stored_config = get_profile_config(profile.alias)
-    if stored_config is None:
-        die(
-            f"Profile {profile.name!r} has no stored config.\n"
-            f"  Run 'omoctl update {profile.alias}' first to fetch and build it."
-        )
-
-    activate_profile(profile.alias, stored_config)
-    print(f"{GREEN}Switched to profile: {BOLD}{profile.name}{RESET}")
-
-
-def cmd_update(args: argparse.Namespace) -> None:
-    config = load_config()
-    state_alias = get_active_alias()
-
-    if args.profile:
-        profile = config.find_profile(args.profile)
-        if profile is None:
-            die(f"Profile {args.profile!r} not found.")
-        profiles = [profile]
-    else:
-        profiles = list(config.profiles)
-
-    print(f"{DIM}Refreshing model list from opencode...{RESET}\n")
-    provider_to_models = load_models(refresh=True)
-    cache = ModelCache(provider_to_models=provider_to_models)
-
-    for idx, profile in enumerate(profiles):
-        if idx:
-            print()
-        print_section(profile.name)
-        print()
-
-        omo_config = fetch_omo_config(tuple(profile.providers))
-        enriched_cache = enrich_cache_with_omo(cache, omo_config)
-
-        curr_config = get_profile_config(profile.alias)
-
-        patched_config, keys = apply_patches_to_config(
-            enriched_cache,
-            profile,
-            omo_config,
-            config,
-        )
-
-        save_profile(profile.alias, patched_config)
-
-        print_diff(curr_config, patched_config, keys)
-
-    # Auto-activate the pinned profile if set, else restore the previously
-    # active one.
-    to_activate = config.get_active_profile()
-    if config.active_profile and to_activate is None:
-        print(
-            f"{DIM}Warning: active_profile {config.active_profile!r} does not "
-            f"match any profile; skipping auto-activation.{RESET}"
-        )
-    if to_activate is None and state_alias:
-        to_activate = config.find_profile(state_alias)
-    if to_activate:
-        stored = get_profile_config(to_activate.alias)
-        if stored:
-            activate_profile(to_activate.alias, stored)
-
-    valid_aliases = {p.alias for p in config.profiles}
-    cleanup_stale(valid_aliases)
-
-
-def cmd_remove(args: argparse.Namespace) -> None:
-    config = load_config()
-    profile = config.find_profile(args.profile)
-
-    if profile is None:
-        die(f"Profile {args.profile!r} not found.")
-
-    remove_profile(profile.alias)
-    print(f"{GREEN}Removed profile: {BOLD}{profile.name}{RESET}")
-    print(
-        f"{DIM}Note: the profile definition is still in config.yaml. Edit it to remove permanently.{RESET}"
+@app.command(name="list", alias="ls")
+def list_() -> None:
+    """List every profile."""
+    config = load()
+    profile_list(
+        [(p.name, p.alias, _summary(config, p)) for p in config.profiles],
+        store.active(),
     )
 
 
-def cmd_check(_args: argparse.Namespace) -> None:
-    config = load_config()
-    provider_to_models = load_models(refresh=False)
-    cache = ModelCache(provider_to_models=provider_to_models)
+@app.command(alias=["apply", "switch"])
+def use(profile: str) -> None:
+    """Activate a profile.
 
-    all_providers = set()
-    for profile in config.profiles:
-        all_providers.update(profile.providers)
-    omo_config = fetch_omo_config(tuple(sorted(all_providers)), quiet=True)
-    enriched_cache = enrich_cache_with_omo(cache, omo_config)
+    Parameters
+    ----------
+    profile
+        Profile name or alias.
+    """
+    config = load()
+    target = _resolve(config, profile)
+    built = _stored(config)
+    if target.alias not in built:
+        die(f"{target.name!r} has not been built yet. Run `omoctl update {target.alias}` first.")
 
-    errors = validate_config(config, enriched_cache)
-    if not print_validation_result(errors):
-        sys.exit(1)
+    store.activate(target.alias, built)
+    console.print(f"[green]Switched to[/] [bold]{target.name}[/]")
 
 
-def cmd_version(_args: argparse.Namespace) -> None:
-    print(f"omoctl {__version__}")
+@app.command(alias=["build", "upgrade"])
+def update(profile: str | None = None, *, dry_run: DryRun = False) -> None:
+    """Fetch fresh OMO configs, apply patches, and save.
+
+    Parameters
+    ----------
+    profile
+        Profile name or alias. Every profile if omitted.
+    dry_run
+        Show what would change without writing anything.
+    """
+    config = load()
+    targets = [_resolve(config, profile)] if profile else list(config.profiles)
+
+    console.print("[dim]Refreshing models from opencode...[/]")
+    pool = load_pool(refresh=True)
+
+    for target in targets:
+        flags = tuple(sorted(config.install_for(target).items()))
+        heading(target.name)
+        console.print(f"[dim]{' '.join(omo.render(flags))}[/]\n")
+
+        patches = config.patches_for(target)
+        drops = config.drops_for(target)
+        source, produced_at = omo.fetch(flags)
+        result, report = patch.build(source, pool, patches, drops, config.overrides_for(target))
+
+        diff(dict(patch.entries(store.load(target.alias) or {})), dict(patch.entries(result)))
+        _report(report, patches, drops)
+
+        if not dry_run:
+            store.save(target.alias, result)
+            store.remember_target(produced_at)
+
+    if dry_run:
+        console.print("[dim]Dry run — nothing written.[/]")
+        return
+
+    for stale in store.prune({p.alias for p in config.profiles}):
+        console.print(f"[dim]Removed stale profile {stale!r}.[/]")
+
+    built = _stored(config)
+    keep = config.activate or store.active()
+    chosen = config.find(keep) if keep else None
+    if chosen and chosen.alias in built:
+        store.activate(chosen.alias, built)
+        console.print(f"[green]Active:[/] [bold]{chosen.name}[/]")
 
 
-def _add_status_flags(p: argparse.ArgumentParser) -> None:
-    # SUPPRESS keeps a subparser from clobbering a flag already parsed at
-    # the top level, so `omoctl -a show` behaves like `omoctl show -a`.
-    group = p.add_mutually_exclusive_group()
-    group.add_argument(
-        "-a",
-        "--alias",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="Print only the active profile alias",
-    )
-    group.add_argument(
-        "-n",
-        "--name",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="Print only the active profile name",
-    )
-    group.add_argument(
-        "-j",
-        "--json",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="Print only the raw JSON config",
-    )
+def _plural(count: int, one: str, many: str) -> str:
+    return f"{count} {one if count == 1 else many}"
+
+
+def _report(report: patch.Report, patches: list, drops: list) -> None:
+    printed = False
+    for index, count in sorted(report.fired.items()):
+        printed = True
+        label = esc(patches[index].match.label)
+        console.print(f"  [dim]{label} → {_plural(count, 'model', 'models')}[/]")
+    for index, entry in enumerate(patches):
+        if index not in report.fired:
+            printed = True
+            console.print(f"  [yellow]no match:[/] [dim]{esc(entry.match.label)}[/]")
+    if drops:
+        printed = True
+        console.print(f"  [dim]drop → {_plural(report.dropped, 'entry', 'entries')}[/]")
+    if report.deduped:
+        printed = True
+        console.print(f"  [dim]deduped → {_plural(report.deduped, 'entry', 'entries')}[/]")
+    for path, wanted, got in report.inexact:
+        printed = True
+        console.print(f"  [yellow]{esc(wanted)} is gone;[/] {esc(path)} → [bold]{esc(got)}[/]")
+    for provider in sorted(report.unlisted):
+        printed = True
+        console.print(
+            f"  [yellow]{esc(provider)} is not in `opencode models`;[/] its ids went unchecked"
+        )
+    if printed:
+        console.print()
+
+
+@app.command(alias="rm")
+def remove(profile: str) -> None:
+    """Delete a built profile. Its definition stays in config.yaml.
+
+    Parameters
+    ----------
+    profile
+        Profile name or alias.
+    """
+    config = load()
+    target = _resolve(config, profile)
+    store.remove(target.alias)
+    console.print(f"[green]Removed built profile[/] [bold]{target.name}[/]")
+
+
+@app.command
+def providers() -> None:
+    """Show every flag `install:` accepts, straight from oh-my-openagent."""
+    emit(omo.install_help())
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="omoctl",
-        description="Manage oh-my-openagent (OMO) profiles",
-    )
-    parser.add_argument(
-        "-v",
-        "--version",
-        action="version",
-        version=f"omoctl {__version__}",
-    )
-    _add_status_flags(parser)
-    parser.set_defaults(func=cmd_status)
-
-    sub = parser.add_subparsers(dest="command")
-
-    show_p = sub.add_parser(
-        "show",
-        aliases=["current", "status"],
-        help="Show active profile (default)",
-    )
-    _add_status_flags(show_p)
-    show_p.set_defaults(func=cmd_status)
-
-    list_p = sub.add_parser("list", aliases=["ls"], help="List all profiles")
-    list_p.set_defaults(func=cmd_list)
-
-    use_p = sub.add_parser(
-        "use",
-        aliases=["apply", "switch"],
-        help="Activate a profile",
-    )
-    use_p.add_argument("profile", help="Profile name or alias")
-    use_p.set_defaults(func=cmd_use)
-
-    update_p = sub.add_parser(
-        "update",
-        aliases=["build", "upgrade"],
-        help="Update profiles (fetch + patch + save)",
-    )
-    update_p.add_argument(
-        "profile",
-        nargs="?",
-        default=None,
-        help="Profile name or alias (all if omitted)",
-    )
-    update_p.set_defaults(func=cmd_update)
-
-    remove_p = sub.add_parser(
-        "remove",
-        aliases=["rm"],
-        help="Remove a stored profile",
-    )
-    remove_p.add_argument("profile", help="Profile name or alias")
-    remove_p.set_defaults(func=cmd_remove)
-
-    check_p = sub.add_parser(
-        "check",
-        aliases=["validate", "verify"],
-        help="Check config against available models/agents",
-    )
-    check_p.set_defaults(func=cmd_check)
-
-    version_p = sub.add_parser("version", help="Print version")
-    version_p.set_defaults(func=cmd_version)
-
-    args = parser.parse_args()
     try:
-        args.func(args)
+        app()
     except KeyboardInterrupt:
-        print("\nAborted.", file=sys.stderr)
-        sys.exit(130)
+        raise SystemExit(130) from None

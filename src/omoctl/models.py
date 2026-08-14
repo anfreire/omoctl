@@ -1,180 +1,238 @@
+"""Model identifiers: how they are described, matched, and resolved.
+
+A model id is treated as an unordered bag of words and numbers
+(`claude-opus-4-8` -> words `claude`, `opus`; numbers `4`, `8`). Nothing here
+knows any provider or model by name: filters are written by the user, and the
+pool of real models comes from `opencode models`.
+"""
+
 from __future__ import annotations
+
 import dataclasses
+import functools
 import itertools
 import re
 import shutil
 import subprocess
 import typing
-from omoctl.output import die
-from omoctl.types import ModelFilter, ModelProps
+
+from omoctl.render import die
+
+# Snapshot suffixes (`-20260814`, `-2026-08`, `-08-14`). Ranked below the
+# stable alias of the same model so `claude-opus-5` beats a dated build.
+_DATED: typing.Final = re.compile(r".*(\d{6,}|20\d{2}-\d{2}(-\d{2})?|\d{2}-20\d{2}|\d{2}-\d{2})$")
+
+Pool = dict[str, tuple[str, ...]]
 
 
-DATED_MODEL_PATTERN: typing.Final[re.Pattern] = re.compile(
-    r".*("
-    r"\d{6,}"
-    r"|20\d{2}[-]\d{2}([-]\d{2})?"
-    r"|\d{2}[-]20\d{2}"
-    r"|\d{2}[-]\d{2}"
-    r")$"
-)
+def _split(parts: typing.Iterable[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    words: list[str] = []
+    numbers: list[str] = []
+    for part in parts:
+        for is_alpha, group in itertools.groupby(part, key=str.isalpha):
+            token = "".join(group)
+            if is_alpha:
+                words.append(token)
+            elif token.isdigit():
+                numbers.append(token)
+    return tuple(words), tuple(numbers)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class ModelCache:
-    provider_to_models: dict[str, tuple[str, ...]]
-    agent_names: tuple[str, ...] = ()
-    category_names: tuple[str, ...] = ()
+class Props:
+    words: tuple[str, ...]
+    numbers: tuple[str, ...]
+
+    @staticmethod
+    @functools.cache
+    def of(model_id: str) -> Props:
+        words, numbers = _split(p.lower() for p in re.split(r"[-._/]", model_id))
+        return Props(words, numbers)
 
 
-def _find_opencode() -> str:
+@dataclasses.dataclass(frozen=True, slots=True)
+class Filter:
+    words_include: tuple[str, ...] = ()
+    words_exclude: tuple[str, ...] = ()
+    numbers_include: tuple[str, ...] = ()
+    numbers_exclude: tuple[str, ...] = ()
+
+    def matches(self, props: Props) -> bool:
+        return (
+            all(w in props.words for w in self.words_include)
+            and not any(w in props.words for w in self.words_exclude)
+            and all(n in props.numbers for n in self.numbers_include)
+            and not any(n in props.numbers for n in self.numbers_exclude)
+        )
+
+
+def _terms(raw: object, what: str) -> tuple[str, ...]:
+    if isinstance(raw, (str, int, float)):
+        raw = [raw]
+    if not isinstance(raw, list):
+        raise ValueError(f"{what} must be a term or a list of terms, got {type(raw).__name__}")
+    for term in raw:
+        if not isinstance(term, (str, int, float)):
+            raise ValueError(
+                f"{what} contains a {type(term).__name__}; terms must be strings or numbers"
+            )
+    return tuple(str(term).lower() for term in raw)
+
+
+def parse_filter(raw: object) -> Filter | str | None:
+    """A `model:` value: exact id, keyword list, include/exclude dict, or None."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        if not raw.strip():
+            raise ValueError("empty model spec; omit `model` to match every model")
+        return raw
+    if isinstance(raw, list):
+        words, numbers = _split(_terms(raw, "a keyword filter"))
+        if not words and not numbers:
+            raise ValueError("no usable terms; omit `model` to match every model")
+        return Filter(words_include=words, numbers_include=numbers)
+    if isinstance(raw, dict):
+        unknown = sorted(set(raw) - {"include", "exclude"})
+        if unknown:
+            raise ValueError(
+                f"unknown filter key(s) {', '.join(map(repr, unknown))}; expected `include` and/or `exclude`"
+            )
+        fields: dict[str, tuple[str, ...]] = {}
+        for key in ("include", "exclude"):
+            if raw.get(key) is None:
+                continue
+            words, numbers = _split(_terms(raw[key], f"`{key}`"))
+            if words:
+                fields[f"words_{key}"] = words
+            if numbers:
+                fields[f"numbers_{key}"] = numbers
+        if not fields:
+            raise ValueError("no usable include/exclude terms; omit `model` to match every model")
+        return Filter(**fields)
+    raise ValueError(f"expected a string, list, or include/exclude dict, got {type(raw).__name__}")
+
+
+def filter_matches(spec: Filter | str, model_id: str) -> bool:
+    if isinstance(spec, str):
+        return spec == model_id
+    return spec.matches(Props.of(model_id))
+
+
+def load_pool(refresh: bool = False) -> Pool:
+    """`opencode models` grouped by provider."""
     opencode = shutil.which("opencode")
-    if opencode:
-        return opencode
-    die("'opencode' binary not found in PATH. Install it from https://opencode.ai")
+    if not opencode:
+        die("`opencode` was not found on PATH. Install it from https://opencode.ai")
 
-
-def load_models(refresh: bool = False) -> dict[str, tuple[str, ...]]:
-    """Run `opencode models [--refresh]` and parse `<provider>/<model>` lines."""
-    opencode = _find_opencode()
-
-    cmd = [opencode, "models"]
-    if refresh:
-        cmd.append("--refresh")
-
+    cmd = [opencode, "models"] + (["--refresh"] if refresh else [])
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError) as e:
-        die(f"Failed to query opencode models:\n  {e}")
-
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as exc:
+        die(f"`opencode models` failed:\n  {exc}")
     if result.returncode != 0:
-        die(
-            "Failed to query opencode models:\n"
-            f"  {(result.stderr or result.stdout or '').strip()}"
-        )
+        die(f"`opencode models` failed:\n  {(result.stderr or result.stdout).strip()}")
 
-    provider_to_models: dict[str, set[str]] = {}
+    pool: dict[str, set[str]] = {}
     for line in result.stdout.splitlines():
         line = line.strip()
-        # Model lines are single `<provider>/<model>` tokens; anything with
-        # whitespace or a missing half is log noise, not a model.
+        # Model lines are a single `provider/model` token; anything with
+        # whitespace or a missing half is log noise.
         if not line or "/" not in line or any(c.isspace() for c in line):
             continue
-        provider, _, model = line.partition("/")
-        if not provider or not model or model.startswith("/"):
-            continue
-        provider_to_models.setdefault(provider, set()).add(model)
-
-    return {p: tuple(sorted(models)) for p, models in provider_to_models.items()}
+        provider, _, model_id = line.partition("/")
+        if provider and model_id and not model_id.startswith("/"):
+            pool.setdefault(provider, set()).add(model_id)
+    return {provider: tuple(sorted(ids)) for provider, ids in pool.items()}
 
 
-def enrich_cache_with_omo(cache: ModelCache, omo_config: dict) -> ModelCache:
-    return ModelCache(
-        provider_to_models=cache.provider_to_models,
-        agent_names=tuple(sorted(omo_config.get("agents", {}).keys())),
-        category_names=tuple(sorted(omo_config.get("categories", {}).keys())),
-    )
+def resolve(
+    pool: Pool, provider: str, want: Filter | str | None, like: str | None
+) -> tuple[str, bool]:
+    """Pick the best `provider/<id>` for `want`, staying close to `like`.
 
+    Returns the id and whether it satisfied the request as written.
 
-def _numbers_key(numbers: tuple[str, ...]) -> tuple[int, ...]:
-    return tuple(int(n) for n in numbers) if numbers else ()
-
-
-def find_best_matching_model(
-    provider_to_models: dict[str, tuple[str, ...]],
-    original_provider: str | None,
-    original_model: str | None,
-    target_provider: str,
-    target_hint: ModelFilter | str | None,
-) -> str:
-    if target_provider not in provider_to_models:
-        die(f"Target provider {target_provider!r} not found in cached models.")
-
-    if isinstance(target_hint, str):
-        if target_hint in provider_to_models[target_provider]:
-            return f"{target_provider}/{target_hint}"
+    With no `want`, the current model's own words and numbers become the
+    filter, so a bare provider switch means "this model, from over there" —
+    which only lands where the two providers name their models alike. An id the
+    provider has since retired is retried without its version, finding its
+    nearest surviving sibling; a filter the user wrote by hand is never relaxed
+    that way, because its terms are a constraint rather than a guess.
+    """
+    if provider not in pool:
+        # `opencode models` only lists providers the user is signed in to. An
+        # id spelled out in full needs no catalogue; anything else does.
+        if isinstance(want, str):
+            return f"{provider}/{want}", True
         die(
-            f"Explicit model {target_hint!r} not found in provider {target_provider!r}."
+            f"Cannot pick a model for provider {provider!r}: `opencode models` does not list it.\n"
+            f"  Sign in to it, or name the model outright in `set`.\n"
+            f"  Listed: {', '.join(sorted(pool))}"
         )
+    ids = pool[provider]
 
-    original_props = (
-        ModelProps.from_model_id(original_model) if original_model else None
-    )
+    if isinstance(want, str) and want in ids:
+        return f"{provider}/{want}", True
 
-    if target_hint is not None:
-        include_words = target_hint.words_include
-        exclude_words = target_hint.words_exclude
-        include_numbers = target_hint.numbers_include
-        exclude_numbers = target_hint.numbers_exclude
+    like_props = Props.of(like) if like else None
+    if isinstance(want, Filter):
+        spec = want
+    elif isinstance(want, str):
+        # A named id the provider no longer has: read it as its own filter, so
+        # the version it asked for still steers the choice.
+        words, numbers = _split(p.lower() for p in re.split(r"[-._]", want))
+        spec = Filter(words_include=words, numbers_include=numbers)
+    elif like_props is not None:
+        spec = Filter(words_include=like_props.words, numbers_include=like_props.numbers)
     else:
-        include_words = ()
-        exclude_words = ()
-        include_numbers = ()
-        exclude_numbers = ()
+        spec = Filter()
 
-    if not target_hint and original_props:
-        include_words = original_props.words
-        include_numbers = original_props.numbers
-
-    version_specified = bool(include_numbers) or bool(
-        original_props and original_props.numbers
-    )
-
-    model_filter = ModelFilter(
-        words_include=include_words,
-        words_exclude=exclude_words,
-        numbers_include=include_numbers,
-        numbers_exclude=exclude_numbers,
-    )
-
-    candidates: list[tuple[str, ModelProps]] = []
-    for model_id in provider_to_models[target_provider]:
-        props = ModelProps.from_model_id(model_id)
-        if model_filter.matches(props):
-            candidates.append((model_id, props))
-
-    if not candidates and version_specified:
-        relaxed_filter = ModelFilter(
-            words_include=include_words,
-            words_exclude=exclude_words,
-        )
-        for model_id in provider_to_models[target_provider]:
-            props = ModelProps.from_model_id(model_id)
-            if relaxed_filter.matches(props):
-                candidates.append((model_id, props))
-
+    exact = True
+    candidates = [i for i in ids if spec.matches(Props.of(i))]
+    if not candidates and spec.numbers_include and not isinstance(want, Filter):
+        relaxed = dataclasses.replace(spec, numbers_include=())
+        candidates = [i for i in ids if relaxed.matches(Props.of(i))]
+        exact = not candidates
     if not candidates:
+        asked = (
+            want if isinstance(want, str) else " ".join(spec.words_include + spec.numbers_include)
+        )
+        hint = (
+            ""
+            if want is not None
+            else f"\n  {provider!r} does not name its models like {like!r}, so `set` has to say which one."
+        )
         die(
-            f"No matching model for {original_model!r} from "
-            f"{original_provider!r} in provider {target_provider!r}."
+            f"No model in provider {provider!r} matches {asked}.{hint}\n  Available: {', '.join(ids)}"
         )
 
-    original_words = set(original_props.words) if original_props else set()
-    original_numbers = original_props.numbers if original_props else ()
-    target_version = _numbers_key(include_numbers or original_numbers)
+    target = tuple(
+        int(n) for n in (spec.numbers_include or (like_props.numbers if like_props else ()))
+    )
+    # Resemblance to the model being replaced guides the choice only when the
+    # patch named none of its own; otherwise it would outweigh what was asked for.
+    like_words = set(like_props.words) if like_props and want is None else set()
+    width = max(len(Props.of(i).numbers) for i in candidates)
 
-    def _sort_key(entry: tuple[str, ModelProps]) -> tuple:
-        model_id, props = entry
-        version = _numbers_key(props.numbers)
-        word_overlap = -len(original_words & set(props.words)) if original_words else 0
-
+    def rank(model_id: str) -> tuple:
+        version = tuple(int(n) for n in Props.of(model_id).numbers)
+        # Honour the version as far as it was named, then take the newest of
+        # what is left: `include: [opus, 4]` means the latest 4.x, not the first.
+        # Both halves are padded so a shorter id never wins by running out of
+        # components.
+        rest = tuple(-v for v in version[len(target) :])
         return (
-            (props.provider_prefix or "") != (original_provider or ""),
-            word_overlap,
-            bool(DATED_MODEL_PATTERN.match(model_id)),
-            "latest" in props.words,
+            -len(like_words & set(Props.of(model_id).words)),
             tuple(
                 abs(a - b)
-                for a, b in itertools.zip_longest(version, target_version, fillvalue=0)
-            )
-            if version_specified
-            else tuple(-v for v in version),
+                for a, b in itertools.zip_longest(version[: len(target)], target, fillvalue=0)
+            ),
+            bool(_DATED.match(model_id)),
+            "latest" in Props.of(model_id).words,
+            rest + (0,) * max(width - len(target) - len(rest), 0),
             len(model_id),
+            model_id,
         )
 
-    candidates.sort(key=_sort_key)
-    return f"{target_provider}/{candidates[0][0]}"
+    return f"{provider}/{min(candidates, key=rank)}", exact
