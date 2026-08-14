@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-15
+
+Rewritten against oh-my-openagent 4.19. The config file OMO reads moved, its
+shape changed, and `--claude` grew a third value — all of which 0.4.0 was blind
+to. Rather than teach omoctl the new vocabulary, this release removes its
+knowledge of OMO's vocabulary entirely, so the next provider, subscription tier
+or config section needs no omoctl release at all.
+
+**`config.yaml` is not backward compatible.** There is no migration path;
+rewrite it against the README. The full 0.4.0 vocabulary — `providers`,
+`source`/`target`, `agent`, `category`, `remove_fallbacks`, `active_profile` —
+is gone.
+
+### Changed
+
+- **BREAKING**: the active config is written to `~/.omo/omo.jsonc`. OMO moved there; `~/.config/opencode/oh-my-openagent.jsonc` now appears only in OMO's legacy-migration list and is never read at runtime, so 0.4.0 has been writing to a dead file since OMO 4.x. Top-level keys omoctl did not produce (`_migrations`, anything OMO adds later) are carried through untouched.
+- **The location is observed rather than assumed.** `update` notes which file the installer wrote inside its sandbox — identified by carrying model references, not by name — and `use` writes to the same place in the real home. Hardcoding that path is what broke 0.4.0; omoctl now follows OMO the next time it moves.
+- **BREAKING**: `providers: [claude, openai]` becomes `install: {claude: yes, openai: yes}`. omoctl no longer discovers OMO's flags by scraping `install --help`, and no longer assumes every flag is a yes/no switch — the map is passed through verbatim as `--flag=value`, so `claude: max20`, `platform: both`, and flags that do not exist yet all work. OMO validates them and its own error, listing the values it accepts, is what you see. This is what made a Max 20x subscription unreachable in 0.4.0.
+- **BREAKING**: `source`/`target` become `match`/`set`. `set` assigns *any* key onto the matched entry — `variant` was the only writable field before — and `null` deletes one. `set: {variant: max, temperature: 0.3}` is a patch, not a feature request. It will not assign a model list (`fallback_models`, `models`): replacing a list wholesale is `overrides`' job, and excluding it means one patch can never invalidate another's target.
+- **BREAKING**: `agent:` and `category:` become `where:`, a glob over the reference's path (`[opencode].agents.oracle.model`). Two hardcoded section names become one expression that also reaches `models` arrays, harness blocks, and sections that do not exist yet. `*` and `?` are the only glob syntax and brackets are literal, so a path copied out of a diff works as written; a pattern with neither is a plain word matched anywhere in the path.
+- **BREAKING**: `remove_fallbacks` becomes `drop`, and applies to `models` lists as well as `fallback_models`.
+- **BREAKING**: `overrides` mirrors `omo.jsonc`'s real shape, which is now harness-scoped. What was `disabled_hooks: [...]` becomes `"[opencode]": {disabled_hooks: [...]}`.
+- **BREAKING**: `check` is now `update --dry-run` (`-n`). It builds every profile, writes nothing, and reports how many models each patch rewrote — including patches that matched nothing, which the old checker could not detect.
+- **BREAKING**: `active_profile` is now `activate`. The old name read like a statement of what is live, which it never was — `omoctl show` reports that, and the two disagreeing was already a bug in 0.4.0.
+- Model references are found by walking the config for keys named `model` or ending in `models`, rather than iterating a literal `("agents", "categories")`. Bare `provider/id` strings inside those lists are patchable too, and are promoted to objects when a patch gives them keys to hold.
+- A `set.model` that names a retired model now resolves to its closest surviving sibling instead of aborting the update, and `update` says when it did.
+- Patches on a provider missing from `opencode models` no longer abort. That list only covers providers you are signed in to, so an id spelled out in full is taken as written; `update` notes that it went unchecked.
+- Repeats within a `models` list are collapsed after patching. A patch scoped to a whole entry rewrites its fallbacks too, and a model listed as its own backup is never what was meant.
+- Rewritten on cyclopts, rich and pydantic. Config errors now name the exact path (`patches.0.match: unknown filter key(s) 'includes'`), and unknown keys are rejected rather than ignored.
+
+### Removed
+
+- The move-aside/restore dance around the installer, and the `active-config.bak` crash-recovery file it needed. Builds now run the installer with `$HOME` pointed at a temporary directory, which cannot touch anything you own.
+- Provider, agent and category validation. OMO validates its own flags better than omoctl could, and `where` globs are not a closed set.
+- The test suite, and pytest from CI and dev dependencies.
+
+### Added
+
+- `omoctl providers` prints `oh-my-opencode install --help` verbatim — the authoritative flag list, uninterpreted.
+- `use` also writes every profile to `omo.jsonc`'s `profiles` block, so `OMO_PROFILE=<alias> opencode` overrides the active profile for one shell.
+- `OMOCTL_PACKAGE` runs a different npm package than `oh-my-opencode`, which has already been renamed once.
+- `--no-tui` and `--skip-auth` are defaults rather than fixed argv; listing either in `install:` overrides it.
+- A clear error when the OMO config does not parse. The installer reaches it through the account's real home directory, which `$HOME` cannot redirect, so a broken file there fails every build however well isolated it is.
+
 ## [0.4.0] - 2026-06-10
 
 ### Added

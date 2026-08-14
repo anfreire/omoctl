@@ -5,7 +5,7 @@
 
 CLI tool for managing [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) profiles in [OpenCode](https://opencode.ai).
 
-OMO wires your agents to one fixed set of models — and the moment providers change (a plan runs dry, a subscription ends, a model has a bad day) you're hand-editing `oh-my-openagent.jsonc` again. omoctl makes it declarative: define profiles once, patch models across providers, and switch whole configurations with a single command.
+OMO wires your agents to one fixed set of models — and the moment providers change (a plan runs dry, a subscription ends, a model has a bad day) you're hand-editing `~/.omo/omo.jsonc` again. omoctl makes it declarative: define profiles once, patch models across providers, and switch whole configurations with a single command.
 
 ## Install
 
@@ -27,30 +27,38 @@ omoctl --help
 ### Prerequisites
 
 - Python 3.11+
-- [bun](https://bun.sh) or [npm](https://nodejs.org) (for fetching OMO configs via `oh-my-opencode`)
-- [OpenCode](https://opencode.ai) installed and on `PATH` (used to list models)
+- [bun](https://bun.sh) or [npm](https://nodejs.org) — used to run `oh-my-opencode`
+- [OpenCode](https://opencode.ai) on `PATH` — used to list models
 
 ## Quick Start
 
 ```bash
+omoctl providers       # what can `install:` say? (oh-my-openagent's own help)
 omoctl update          # fetch & build all profiles
 omoctl list            # see what's available
 omoctl use claude      # activate a profile
 omoctl                 # show active profile
-omoctl check           # check config against available models/agents
 ```
 
 ## Commands
 
 | Command | Aliases | Description |
 |---|---|---|
-| `omoctl [show]` | `current`, `status` | Show active profile. Use `-a`/`-n`/`-j` to print only the alias, name, or JSON (e.g. `omoctl -j`) |
+| `omoctl [show]` | `current`, `status` | Show active profile. `-a`/`-n`/`-j` print only the alias, name, or active JSON |
 | `omoctl list` | `ls` | List all profiles |
 | `omoctl use <profile>` | `apply`, `switch` | Activate a profile (by name or alias) |
-| `omoctl update [profile]` | `build`, `upgrade` | Fetch fresh OMO configs, apply patches, save. All profiles if omitted |
-| `omoctl remove <profile>` | `rm` | Remove a stored profile |
-| `omoctl check` | `validate`, `verify` | Check config against available models, agents, and categories |
-| `omoctl version` | — | Print version. Also available as `-v` |
+| `omoctl update [profile]` | `build`, `upgrade` | Fetch fresh OMO configs, apply patches, save. `--dry-run`/`-n` changes nothing |
+| `omoctl remove <profile>` | `rm` | Delete a built profile |
+| `omoctl providers` | — | Print `oh-my-opencode install --help`, verbatim |
+
+## Design
+
+omoctl hardcodes nothing about OMO's shape, so a new provider, a new subscription tier, or a new config section needs no new omoctl release.
+
+- **Install flags are your data.** `install:` is passed straight through as `--flag=value`. omoctl never inspects the names or the values, so `claude: max20`, `platform: both`, and whatever ships next all work. OMO validates them and its own error is what you see.
+- **Model references are found, not enumerated.** Any `provider/id` under a key named `model`, or ending in `models`, is a model reference — wherever it lives in the tree, whatever section it belongs to.
+- **Fetching is isolated.** Each build runs the installer with `$HOME` pointed at a temporary directory, so it produces a pristine config for that flag set and cannot touch anything you own.
+- **The config's location is observed, not assumed.** `update` notes which file the installer wrote inside that sandbox, and `use` writes to the same place in your real home. 0.4.0 broke precisely because it hardcoded a path OMO later moved.
 
 ## Config
 
@@ -59,220 +67,208 @@ Located at `~/.config/omoctl/config.yaml`. Created on first run.
 ### Minimal example
 
 ```yaml
+install: { claude: yes, gemini: no, copilot: no }
+
 profiles:
   - name: Claude
-    providers: [claude]
 ```
 
-That's it. One profile, one provider. Run `omoctl update` and you're done.
+Run `omoctl update` and you're done.
 
 ### Full example
 
 ```yaml
-active_profile: no-copilot
+# Flags every profile inherits. Profiles merge their own on top.
+install:
+  claude: no
+  gemini: no
+  copilot: no
+
+# Switch to this profile after every `update`.
+activate: Max
+
+# Applied to every profile. Profile patches are tried first.
+patches:
+  - match: { provider: anthropic, model: [sonnet] }
+    set:   { model: claude-opus-5 }
+
+drop:
+  - { provider: openai, model: gpt-5-nano }
 
 overrides:
-  disabled_hooks:
-    - context-window-monitor
-
-patches:
-  - source: { provider: google }
-    target: { provider: proxy }
+  "[opencode]":
+    disabled_hooks: [context-window-monitor]
 
 profiles:
-  - name: Claude
-    providers: [claude]
-
-  - name: Claude & OpenAI
-    providers: [claude, openai]
-
-  - name: No Copilot
-    providers: [claude, gemini, openai]
+  - name: Max
+    install: { claude: max20, opencode-go: yes }
     patches:
-      - source: { provider: google, model: gemini-3.1-pro-preview }
-        target: { provider: proxy, model: gemini-3-1-pro-xhigh, variant: null }
-    overrides:
-      disabled_hooks:
-        - context-window-monitor
-        - some-other-hook
+      - match: { where: "*.agents.oracle.model" }
+        set:   { provider: opencode-go, model: glm-5.2, variant: null }
+
+  - name: Frugal
+    install: { opencode-go: yes }
+    drop:
+      - { provider: anthropic }
 ```
 
 ### Fields
 
-| Field | Type | Description |
-|---|---|---|
-| `active_profile` | string | Profile to auto-activate after `update`. Optional. Does not affect what `show`/`list` report — they always reflect the actually active profile |
-| `overrides` | dict | OMO config overrides applied to all profiles |
-| `patches` | list | Global patches applied to all profiles (see [Patches](#patches)) |
-| `remove_fallbacks` | list | Global rules for dropping entries from `fallback_models` lists. Each entry is a source matcher (see [Removing Fallbacks](#removing-fallbacks)) |
-| `profiles` | list | Profile definitions (at least one required) |
-
-### Profile fields
+Every field except `profiles` may be set globally, per profile, or both.
 
 | Field | Type | Description |
 |---|---|---|
-| `name` | string | **Required.** Display name. Also determines the alias (e.g. `"No Copilot"` -> `no-copilot`) |
-| `providers` | list | **Required.** OMO providers to enable. Run `omoctl check` to see available providers |
-| `patches` | list | Profile-specific patches. Take priority over global patches |
-| `overrides` | dict | OMO config overrides. Deep-merged on top of the global `overrides` |
-| `remove_fallbacks` | list | Profile-specific fallback-removal rules. Added to the global `remove_fallbacks` |
+| `install` | dict | Flags for `oh-my-opencode install`. Profile values merge over global ones |
+| `patches` | list | Model rewrites (see [Patches](#patches)). Profile patches are tried before global ones |
+| `drop` | list | Entries to remove from `fallback_models` / `models` lists (see [Drop](#drop)) |
+| `overrides` | dict | Deep-merged into the final `omo.jsonc`. Mirrors that file's real shape, harness block included |
+| `activate` | string | Profile to switch to after every `update`. Global only |
+| `profiles` | list | Profile definitions, each with a `name`. Global only, at least one required |
+
+A profile's alias comes from its name: `"No Copilot"` -> `no-copilot`.
+
+### install
+
+`install:` is a plain map of `oh-my-opencode install` flags. Run `omoctl providers` to see the current set.
+
+```yaml
+install:
+  claude: max20        # --claude=max20
+  opencode-go: yes     # --opencode-go=yes
+  platform: both       # --platform=both
+  codex-autonomous:    # --codex-autonomous  (no value, so no `=`)
+```
+
+`--no-tui` and `--skip-auth` are supplied by default; list either in `install:` to override. OMO requires a value for some flags even when you don't want them (`--gemini`, `--copilot`); put those in the global `install:` once and forget about them.
+
+Set `OMOCTL_PACKAGE` to run a different npm package than `oh-my-opencode`.
+
+> YAML reads the bare words `yes` and `no` as booleans, and omoctl writes them back out as `yes`/`no`. Any other literal that YAML would eat — `on`, `off` — needs quoting.
 
 ## Patches
 
-Patches rewrite models in the OMO config before saving. A patch has a `source` (what to match) and a `target` (what to replace it with).
+A patch has a `match` (which model references it applies to) and a `set` (what to assign). Every model reference in the config is offered to the patches in order; the first `match` that fits wins.
 
-### Source
+### match
 
-The source specifies what to match. All fields are optional but at least one must be set.
-
-| Field | Type | Description |
-|---|---|---|
-| `provider` | string | Match models from this provider (e.g. `google`, `anthropic`) |
-| `model` | string, list, or dict | Filter which models to match (see [Model Filters](#model-filters)) |
-| `agent` | string | Match a specific agent (e.g. `sisyphus`, `oracle`) |
-| `category` | string | Match a specific category (e.g. `deep`, `quick`) |
-
-These combine: `{ agent: sisyphus, provider: google }` matches sisyphus only when it uses a google model, and `{ agent: sisyphus, model: [opus] }` matches sisyphus only when its model passes the filter.
-
-### Target
+All three fields are optional, at least one is required, and all given ones must hold.
 
 | Field | Type | Description |
 |---|---|---|
-| `provider` | string | Target provider. Falls back to source provider if omitted |
-| `model` | string, list, or dict | Target model (see [Model Filters](#model-filters)) |
-| `variant` | string or null | `"max"` sets variant, `null` removes it, omit to keep existing |
+| `where` | string | Glob over the reference's path. A plain word matches anywhere in it |
+| `provider` | string | The reference's current provider |
+| `model` | string, list, or dict | The reference's current model. A bare string is an exact id, not a substring (see [Model Filters](#model-filters)) |
 
-### Examples
+Paths look like `[opencode].agents.oracle.model` and `[opencode].categories.quick.fallback_models.1.model`, which is what `where` matches against:
 
 ```yaml
-patches:
-  # Redirect all google models to a proxy provider
-  - source: { provider: google }
-    target: { provider: proxy }
-
-  # Redirect a specific model to a specific target
-  - source: { provider: google, model: gemini-3.1-pro-preview }
-    target: { provider: proxy, model: gemini-3-1-pro-xhigh, variant: null }
-
-  # Override a specific agent
-  - source: { agent: sisyphus }
-    target: { provider: anthropic, model: claude-opus-4-7, variant: max }
-
-  # Override a category
-  - source: { category: ultrabrain }
-    target: { provider: openai, model: gpt-5.4, variant: xhigh }
+where: oracle                                # every oracle model, fallbacks included
+where: "[opencode].agents.oracle.model"      # oracle's main model, pasted from a diff
+where: "*.agents.*.model"                    # every agent's main model
+where: "*.categories.*"                      # every category
+where: "*.fallback_models.*"                 # every fallback, everywhere
 ```
 
-### Priority
+`*` and `?` are the only glob syntax; a pattern using neither is a plain word, matched anywhere in the path. Brackets are literal, so a path copied out of a diff works as written.
 
-1. Agent/category patches take priority over provider/model patches
-2. Within each kind, the best-scoring source wins: an exact model match beats a filter, a filter beats no model constraint, and more specific filters beat less specific ones
-3. For agent/category patches with equal model scores, having a `provider` constraint wins
-4. On a complete tie, the earlier patch wins — profile patches are checked before global patches
+### set
 
-## Removing Fallbacks
-
-`remove_fallbacks` drops specific entries from the `fallback_models` lists that OMO ships with, before patches are applied. Each entry is a flat object with the same matcher fields used in [Patches](#patches):
-
-| Field | Type | Description |
-|---|---|---|
-| `provider` | string | Match fallbacks from this provider (e.g. `openai`, `anthropic`) |
-| `model` | string, list, or dict | Filter which models to match (see [Model Filters](#model-filters)) |
-| `agent` | string | Only apply to fallbacks belonging to this agent (e.g. `sisyphus`) |
-| `category` | string | Only apply to fallbacks belonging to this category (e.g. `deep`) |
-
-At least one of `provider`, `agent`, or `category` must be set. Matching is done against the **original** OMO model — not the post-patch model. So a fallback that would have been rewritten by a patch is still removed if its original model matches.
-
-### Examples
+Every key in `set` is assigned onto the matched entry. `provider` and `model` together resolve the model id; `null` deletes a key; anything else is written as-is.
 
 ```yaml
-# Remove a specific model from all fallback lists globally
-remove_fallbacks:
-  - provider: openai
-    model: gpt-4-mini
-
-# Remove all fallbacks for a specific agent matching a filter
-profiles:
-  - name: No Copilot
-    providers: [claude, gemini, openai]
-    remove_fallbacks:
-      - agent: sisyphus
-        provider: openai
+set: { model: claude-opus-5 }                    # same provider, different model
+set: { provider: opencode-go }                   # same model, different provider
+set: { provider: openai, model: [gpt, mini] }    # both, by filter
+set: { variant: null }                           # drop the variant, keep the model
+set: { variant: max, temperature: 0.3 }          # any key the OMO schema allows
 ```
 
-### Priority
+A bare `provider/id` string inside a `models` list becomes an object automatically when `set` gives it keys to hold.
 
-1. Profile `remove_fallbacks` are applied alongside global `remove_fallbacks` (any match removes the entry)
-2. The first matching entry removes the fallback; remaining rules are not evaluated for that entry
+`set` cannot assign `fallback_models`, `models`, or any other model list — replacing a list wholesale is `overrides`' job, and keeping it out of `set` means one patch can never invalidate another's target.
+
+### Resolution
+
+Model ids are read as words and numbers: `claude-opus-4-7` is words `claude`, `opus` and numbers `4`, `7`. A filter matches on those parts, and among the matches the version is honoured as far as you named it — `[opus, 4]` picks the newest `4.x`, `[opus]` picks the newest opus outright.
+
+`set.model` takes an id verbatim when the provider has one. Otherwise it is read as a filter of its own words and numbers, so a pin that a provider has since retired lands on its nearest surviving sibling — `claude-opus-4-8` finds `claude-opus-4-7` — and `update` says so rather than failing.
+
+Omitting `set.model` reuses the current model's words and numbers, which is what lets `set: {provider: opencode}` mean "the same model from somewhere else". That only works where the two providers name their models alike; when they don't, omoctl says so and you name the model yourself.
+
+## Drop
+
+`drop` removes entries from `fallback_models` and `models` lists before patches run, so matching is against the model OMO shipped, not the patched one. Entries use the same `match` fields:
+
+```yaml
+drop:
+  - { provider: openai }                              # every openai fallback
+  - { provider: anthropic, model: [haiku] }           # one model everywhere
+  - { where: sisyphus, provider: opencode-go }        # scoped to one agent
+```
+
+After patching, repeats within a list are collapsed — a patch scoped to a whole entry rewrites its fallbacks too, and the same model listed twice as its own backup is never what was meant.
 
 ## Model Filters
 
-The `model` field in source/target accepts three formats:
+The `model` field in `match` and `set` accepts three shapes:
 
-**Exact match** — a string:
 ```yaml
-model: gemini-3.1-pro-preview
-```
-
-**Keyword filter** — a list of terms that must all match:
-```yaml
-model: [gemini, pro]
-```
-
-**Include/exclude filter** — fine-grained control:
-```yaml
-model:
+model: gemini-3.1-pro-preview        # exact id
+model: [gemini, pro]                 # all terms must match
+model:                               # fine-grained
   include: [gemini, pro]
   exclude: [flash]
 ```
 
-Model IDs are split into words and numbers (e.g. `claude-opus-4-7` -> words: `[claude, opus]`, numbers: `[4, 7]`). Filters match against these parts. A single term may be given without list brackets (`include: opus`).
+A single term needs no brackets (`include: opus`). Malformed filters — unknown keys like `includes:`, wrong types, empty filters — are rejected when the config loads, with the offending patch named.
 
-Malformed filters are rejected up front: unknown keys (e.g. `includes:`), wrong value types, and empty filters fail at config load with the offending patch named — they never silently match everything.
+## Checking your config
+
+Structural problems fail on load, on every command:
+
+```
+Error: ~/.config/omoctl/config.yaml:
+  patches.0.match: Value error, unknown filter key(s) 'includes'; expected `include` and/or `exclude`
+```
+
+`omoctl update --dry-run` builds everything and writes nothing, reporting what each patch did:
+
+```
+  where=*.agents.oracle.model → 1 model
+  provider=anthropic model=['sonnet'] → 3 models
+  no match: where=nonexistent-agent
+  drop → 2 entries
+```
+
+Bad install flags are reported by OMO itself, with the values it accepts:
+
+```
+[X] Validation failed:
+  * Invalid --claude value: maybe (expected: no, yes, max20)
+```
 
 ## File Layout
 
 ```
 ~/.config/omoctl/
-  config.yaml              # your config
-  active                   # active profile alias — the source of truth for `show`/`list`
-  active-config.bak        # transient crash-safety backup, only present during `update`
+  config.yaml        # your config
+  active             # active profile alias
+  target             # where the installer last put its config
   profiles/
-    claude.json            # stored OMO config per profile
-    no-copilot.json
+    max.json         # built OMO config, one per profile
 
-~/.config/opencode/
-  oh-my-openagent.jsonc    # active profile config (plain JSON, read by oh-my-openagent plugin)
+~/.omo/
+  omo.jsonc          # what OpenCode reads — written by `use`
 ```
 
-## Validation
-
-Structural problems — invalid YAML, unknown fields, wrong types, malformed model filters — are caught when the config is loaded, so every command fails fast with a pointed error.
-
-`omoctl check` additionally checks your config against live data:
-
-- Profile **providers** are valid OMO providers
-- Patch source/target **providers** exist in the model cache
-- Patch source/target **models** exist in their provider (exact strings), and **filters** match at least one available model
-- Patch **agent** and **category** names exist in the OMO config
-- `active_profile` names a defined profile
-
-On failure, it prints each error with available options:
-
-```
-Validation failed with 2 error(s):
-
-  • global patch [0]: source provider 'nonexistent' not found.
-  • profile 'Test' patch [0]: source agent 'fake' not found. Available: atlas, explore, ...
-```
+`use` writes the active profile to `omo.jsonc` and every profile to its `profiles` block, so `OMO_PROFILE=<alias> opencode` overrides the active one for a single shell. Top-level keys omoctl did not produce are carried through untouched.
 
 ## Development
 
 ```bash
-uv sync --group dev      # install with dev dependencies
-uv run pytest            # run the test suite
-uv run ruff check src/ tests/
-uv run ruff format --check src/ tests/
+uv sync --group dev
+uv run ruff check src/
+uv run ruff format --check src/
 uv run mypy src/omoctl
 ```
 
